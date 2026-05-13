@@ -33,8 +33,16 @@ pub(super) fn cors_headers_for_origin(origin: Option<&str>) -> String {
     )
 }
 
+fn request_headers(request: &str) -> &str {
+    request
+        .find("\r\n\r\n")
+        .or_else(|| request.find("\n\n"))
+        .map(|header_end| &request[..header_end])
+        .unwrap_or(request)
+}
+
 fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    request.lines().find_map(|line| {
+    request_headers(request).lines().find_map(|line| {
         let (header_name, value) = line.split_once(':')?;
         if header_name.trim().eq_ignore_ascii_case(name) {
             Some(value.trim())
@@ -92,6 +100,29 @@ fn normalize_host_authority(host: &str) -> String {
     host
 }
 
+fn authority_host(authority: &str) -> &str {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        if let Some(bracket_end) = stripped.find(']') {
+            return &authority[..=bracket_end + 1];
+        }
+    }
+
+    if let Some((host, _port)) = authority.rsplit_once(':') {
+        if !host.contains(':') {
+            return host;
+        }
+    }
+
+    authority
+}
+
+fn is_loopback_authority(authority: &str) -> bool {
+    matches!(
+        authority_host(authority),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    )
+}
+
 fn header_authority_matches_host(request: &str, header_name: &str) -> bool {
     let Some(authority) =
         request_header_value(request, header_name).and_then(normalize_origin_authority)
@@ -101,7 +132,7 @@ fn header_authority_matches_host(request: &str, header_name: &str) -> bool {
     let Some(host) = request_header_value(request, "host").map(normalize_host_authority) else {
         return false;
     };
-    authority == host
+    authority == host && is_loopback_authority(&authority) && is_loopback_authority(&host)
 }
 
 /// Protects the command relay by requiring same-origin browser metadata.
@@ -573,6 +604,48 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn command_post_without_origin_or_referer_is_rejected() {
         let body = r#"{"action":"tabs"}"#;
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden command response exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_post_with_dns_rebinding_host_is_rejected() {
+        let body = r#"{"action":"tabs"}"#;
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: attacker.example:7777\r\nOrigin: http://attacker.example:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden command response exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_post_ignores_header_like_body_lines() {
+        let body = "Referer: http://localhost:7777\r\n{\"action\":\"tabs\"}";
         let request = format!(
             "POST /api/command HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
