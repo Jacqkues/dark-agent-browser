@@ -1688,9 +1688,6 @@ fn launch_options_from_env() -> LaunchOptions {
     let headed = env::var("AGENT_BROWSER_HEADED")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-    let hide_scrollbars = env::var("AGENT_BROWSER_HIDE_SCROLLBARS")
-        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""))
-        .unwrap_or(true);
 
     let extensions: Option<Vec<String>> = env::var("AGENT_BROWSER_EXTENSIONS").ok().map(|v| {
         v.split([',', '\n'])
@@ -1726,10 +1723,22 @@ fn launch_options_from_env() -> LaunchOptions {
             .unwrap_or(false),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
-        hide_scrollbars,
+        hide_scrollbars: hide_scrollbars_from_env(),
         viewport_size: None,
         use_real_keychain: false,
     }
+}
+
+fn hide_scrollbars_from_env() -> bool {
+    env::var("AGENT_BROWSER_HIDE_SCROLLBARS")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""))
+        .unwrap_or(true)
+}
+
+fn hide_scrollbars_from_launch_cmd(cmd: &Value) -> bool {
+    cmd.get("hideScrollbars")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(hide_scrollbars_from_env)
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
@@ -1895,10 +1904,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("downloadPath")
             .and_then(|v| v.as_str())
             .map(String::from),
-        hide_scrollbars: cmd
-            .get("hideScrollbars")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
+        hide_scrollbars: hide_scrollbars_from_launch_cmd(cmd),
         viewport_size: None,
         use_real_keychain: false,
     };
@@ -8460,6 +8466,27 @@ mod tests {
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
         let opts = launch_options_from_env();
         assert!(!opts.hide_scrollbars);
+    }
+
+    #[test]
+    fn test_launch_cmd_hide_scrollbars_missing_uses_env_default() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
+
+        assert!(!hide_scrollbars_from_launch_cmd(&json!({
+            "action": "launch"
+        })));
+    }
+
+    #[test]
+    fn test_launch_cmd_hide_scrollbars_explicit_overrides_env_default() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
+
+        assert!(hide_scrollbars_from_launch_cmd(&json!({
+            "action": "launch",
+            "hideScrollbars": true
+        })));
     }
 
     #[test]
