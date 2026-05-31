@@ -2,14 +2,28 @@
 
 /**
  * Postinstall script for agent-browser
- * 
- * Downloads the platform-specific native binary if not present.
+ *
+ * Downloads the platform-specific native binary from the matching GitHub
+ * release. The npm package intentionally ships only the JS launcher plus
+ * install scripts so installs do not download binaries for other platforms.
  * On global installs, patches npm's bin entry to use the native binary directly:
  * - Windows: Overwrites .cmd/.ps1 shims
  * - Mac/Linux: Replaces symlink to point to native binary
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  createWriteStream,
+  unlinkSync,
+  writeFileSync,
+  symlinkSync,
+  lstatSync,
+  readFileSync,
+  renameSync,
+  statSync,
+} from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
@@ -37,45 +51,93 @@ const platformKey = `${osKey}-${arch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const binaryName = `agent-browser-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
+const sourceCheckoutMarker = join(projectRoot, 'cli', 'Cargo.toml');
 
 // Package info
-const packageJson = JSON.parse(
-  (await import('fs')).readFileSync(join(projectRoot, 'package.json'), 'utf8')
-);
+const packageJson = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 const version = packageJson.version;
 
 // GitHub release URL
 const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
+function hasUsableBinary(path) {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function cleanupFile(path) {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Best effort cleanup only
+  }
+}
+
 async function downloadFile(url, dest) {
+  const tmpDest = `${dest}.download-${process.pid}-${Date.now()}`;
+
   return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    
-    const request = (url) => {
-      get(url, (response) => {
+    const file = createWriteStream(tmpDest, { flags: 'wx' });
+    let settled = false;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      file.destroy();
+      cleanupFile(tmpDest);
+      cleanupFile(dest);
+      reject(err);
+    };
+
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        renameSync(tmpDest, dest);
+        resolve();
+      } catch (err) {
+        cleanupFile(tmpDest);
+        reject(err);
+      }
+    };
+
+    const request = (currentUrl, redirects = 0) => {
+      get(currentUrl, (response) => {
         // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          request(response.headers.location);
+        if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
+          response.resume();
+          if (redirects >= 5 || !response.headers.location) {
+            fail(new Error('Too many redirects while downloading native binary'));
+            return;
+          }
+          request(new URL(response.headers.location, currentUrl).toString(), redirects + 1);
           return;
         }
-        
+
         if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
+          response.resume();
+          fail(new Error(`Failed to download: HTTP ${response.statusCode}`));
           return;
         }
-        
+
         response.pipe(file);
         file.on('finish', () => {
-          file.close();
-          resolve();
+          file.close((err) => {
+            if (err) {
+              fail(err);
+              return;
+            }
+            succeed();
+          });
         });
-      }).on('error', (err) => {
-        unlinkSync(dest);
-        reject(err);
-      });
+      }).on('error', fail);
     };
-    
+
+    file.on('error', fail);
     request(url);
   });
 }
@@ -107,7 +169,7 @@ function writeInstallMethod() {
 
 async function main() {
   // Check if binary already exists
-  if (existsSync(binaryPath)) {
+  if (hasUsableBinary(binaryPath)) {
     // Ensure binary is executable (npm doesn't preserve execute bit)
     if (platform() !== 'win32') {
       chmodSync(binaryPath, 0o755);
@@ -143,9 +205,21 @@ async function main() {
   } catch (err) {
     console.log(`Could not download native binary: ${err.message}`);
     console.log('');
-    console.log('To build the native binary locally:');
-    console.log('  1. Install Rust: https://rustup.rs');
-    console.log('  2. Run: npm run build:native');
+    console.log('The npm package downloads the native binary from GitHub Releases during install.');
+    console.log('Reinstall the package to retry, or download the matching release asset manually:');
+    console.log(`  ${DOWNLOAD_URL}`);
+    console.log(`  Place it at: ${binaryPath}`);
+    if (existsSync(sourceCheckoutMarker)) {
+      console.log('');
+      console.log('For a source checkout, you can also build the native binary locally:');
+      console.log('  1. Install Rust: https://rustup.rs');
+      console.log('  2. Run: pnpm run build:native');
+      console.log('');
+      console.log('Continuing because this looks like a source checkout.');
+    } else {
+      process.exitCode = 1;
+      return;
+    }
   }
 
   writeInstallMethod();
@@ -231,6 +305,10 @@ async function fixGlobalInstallBin() {
  * Replace the symlink to the JS wrapper with a symlink to the native binary.
  */
 async function fixUnixSymlink() {
+  if (!hasUsableBinary(binaryPath)) {
+    return;
+  }
+
   // Get npm's global bin directory (npm prefix -g + /bin)
   let npmBinDir;
   try {
@@ -293,7 +371,7 @@ async function fixWindowsShims() {
   const absoluteBinaryPath = join(npmBinDir, relativeBinaryPath);
 
   // Only rewrite shims if the native binary actually exists
-  if (!existsSync(absoluteBinaryPath)) {
+  if (!hasUsableBinary(absoluteBinaryPath)) {
     return;
   }
 

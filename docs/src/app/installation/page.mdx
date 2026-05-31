@@ -2,14 +2,14 @@
 
 ## Global installation (recommended)
 
-Installs the native Rust binary for maximum performance:
+Installs a small launcher, then downloads the native Rust binary for your platform from the GitHub release:
 
 ```bash
 npm install -g agent-browser
 agent-browser install  # Download Chrome from Chrome for Testing (first time)
 ```
 
-This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
+This is the fastest option — commands run through the native Rust CLI directly with sub-millisecond parsing overhead. Chrome is still downloaded separately with `agent-browser install`.
 
 ## Quick start (no install)
 
@@ -28,6 +28,7 @@ npx agent-browser install  # Download Chrome (first time)
 ```
 
 Then use via `npx` or `package.json` scripts.
+The npm install downloads only the native binary for the current platform.
 
 ## Homebrew (macOS)
 

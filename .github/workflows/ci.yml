@@ -20,8 +20,14 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Check version sync
         run: node scripts/check-version-sync.js
+
+      - name: Check npm package contents
+        run: pnpm run pack:check
 
   rust:
     name: Rust
@@ -236,11 +242,29 @@ jobs:
         run: Copy-Item cli/target/${{ matrix.target }}/release/agent-browser.exe bin/${{ matrix.binary }}
 
       - name: Test npm global install
+        if: runner.os != 'Windows'
         run: |
           npm pack
-          npm install -g agent-browser-*.tgz
+          npm install -g agent-browser-*.tgz --ignore-scripts
+          PACKAGE_DIR="$(npm root -g)/agent-browser"
+          mkdir -p "$PACKAGE_DIR/bin"
+          cp "bin/${{ matrix.binary }}" "$PACKAGE_DIR/bin/${{ matrix.binary }}"
+          node "$PACKAGE_DIR/scripts/postinstall.js"
           agent-browser --version
         shell: bash
+
+      - name: Test npm global install
+        if: runner.os == 'Windows'
+        run: |
+          npm pack
+          $tarball = (Get-ChildItem agent-browser-*.tgz | Select-Object -First 1).FullName
+          npm install -g $tarball --ignore-scripts
+          $packageDir = "$(npm root -g)\agent-browser"
+          New-Item -ItemType Directory -Force "$packageDir\bin" | Out-Null
+          Copy-Item "bin\${{ matrix.binary }}" "$packageDir\bin\${{ matrix.binary }}"
+          node "$packageDir\scripts\postinstall.js"
+          agent-browser --version
+        shell: pwsh
 
       - name: Verify symlink points to native binary (Unix)
         if: runner.os != 'Windows'

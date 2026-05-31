@@ -32,7 +32,7 @@ next ref interaction.
 ## Quickstart
 
 ```bash
-# Install once
+# Install once. npm downloads the matching native binary; install downloads Chrome.
 npm i -g agent-browser && agent-browser install
 
 # Take a screenshot of a page

@@ -9,12 +9,21 @@
  */
 
 import { spawn, execSync } from 'child_process';
-import { existsSync, accessSync, chmodSync, constants } from 'fs';
+import { existsSync, accessSync, chmodSync, constants, readFileSync, statSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const projectRoot = join(__dirname, '..');
+
+function hasUsableBinary(path) {
+  try {
+    return statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+}
 
 // Detect if the system uses musl libc (e.g. Alpine Linux)
 function isMusl() {
@@ -75,12 +84,29 @@ function main() {
 
   const binaryPath = join(__dirname, binaryName);
 
-  if (!existsSync(binaryPath)) {
+  if (!hasUsableBinary(binaryPath)) {
+    let releaseUrl = null;
+    try {
+      const packageJson = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
+      releaseUrl = `https://github.com/vercel-labs/agent-browser/releases/download/v${packageJson.version}/${binaryName}`;
+    } catch {
+      // Best effort only
+    }
+
     console.error(`Error: No binary found for ${platform()}-${arch()}`);
     console.error(`Expected: ${binaryPath}`);
     console.error('');
-    console.error('Run "npm run build:native" to build for your platform,');
-    console.error('or reinstall the package to trigger the postinstall download.');
+    console.error('The native binary is downloaded during npm postinstall.');
+    console.error('Reinstall this package to retry the download.');
+    if (releaseUrl) {
+      console.error('');
+      console.error('Manual download:');
+      console.error(`  ${releaseUrl}`);
+    }
+    if (existsSync(join(projectRoot, 'cli', 'Cargo.toml'))) {
+      console.error('');
+      console.error('For a source checkout, run "pnpm run build:native".');
+    }
     process.exit(1);
   }
 

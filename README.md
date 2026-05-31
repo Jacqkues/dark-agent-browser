@@ -8,7 +8,7 @@ Browser automation CLI for AI agents. Fast native Rust CLI.
 
 ### Global Installation (recommended)
 
-Installs the native Rust binary:
+Installs a small launcher, then downloads the native Rust binary for your platform from the GitHub release:
 
 ```bash
 npm install -g agent-browser
@@ -25,6 +25,7 @@ agent-browser install
 ```
 
 Then use via `package.json` scripts or by invoking `agent-browser` directly.
+The npm install downloads only the native binary for the current platform. Chrome is still downloaded separately with `agent-browser install`.
 
 ### Homebrew (macOS)
 

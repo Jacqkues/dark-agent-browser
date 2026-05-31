@@ -191,7 +191,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs: [check-release, build-binaries]
+    needs: [check-release, build-binaries, github-release]
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -216,7 +216,31 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Download all binary artifacts
+      - name: Verify npm package contents
+        run: pnpm run pack:check
+
+      - name: Test install from npm package tarball
+        run: |
+          npm pack
+          npm install -g agent-browser-*.tgz
+          agent-browser --version
+
+      - name: Publish to npm
+        run: npm publish --provenance
+
+  github-release:
+    name: Create GitHub Release
+    needs: [check-release, build-binaries]
+    if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
@@ -227,10 +251,9 @@ jobs:
           find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
           rm -rf artifacts
           chmod +x bin/agent-browser-* 2>/dev/null || true
-          echo "Binaries in bin/:"
           ls -la bin/
 
-      - name: Verify all binaries exist
+      - name: Verify binaries exist
         run: |
           EXPECTED_BINARIES=(
             "agent-browser-linux-x64"
@@ -262,44 +285,6 @@ jobs:
             exit 1
           fi
           echo "All 7 platform binaries present and valid"
-
-      - name: Publish to npm
-        run: npm publish --provenance
-
-  github-release:
-    name: Create GitHub Release
-    needs: [check-release, build-binaries, publish]
-    if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-
-      - name: Move binaries to bin directory
-        run: |
-          mkdir -p bin
-          find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
-          rm -rf artifacts
-          chmod +x bin/agent-browser-* 2>/dev/null || true
-          ls -la bin/
-
-      - name: Verify binaries exist
-        run: |
-          BINARY_COUNT=$(ls bin/agent-browser-* 2>/dev/null | wc -l)
-          if [ "$BINARY_COUNT" -lt 7 ]; then
-            echo "Error: Expected 7 binaries, found $BINARY_COUNT"
-            ls -la bin/
-            exit 1
-          fi
-          echo "Found $BINARY_COUNT binaries"
 
       - name: Extract changelog entry
         run: |
