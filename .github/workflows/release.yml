@@ -152,7 +152,7 @@ jobs:
         if: matrix.use_zigbuild
         run: |
           pip3 install ziglang
-          cargo install cargo-zigbuild
+          cargo install cargo-zigbuild --version 0.22.3 --locked
 
       - name: Configure Rust linkers
         if: runner.os == 'Linux'

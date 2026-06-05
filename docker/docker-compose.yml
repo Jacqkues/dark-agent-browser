@@ -83,36 +83,55 @@ services:
         rust_target="$${RUST_TARGET:-}"
         build_target="$${BUILD_TARGET:-}"
         legacy_target="$${TARGET:-}"
-        legacy_rust_target=""
-        legacy_build_target=""
 
-        if [ -n "$$legacy_target" ]; then
-          case "$$legacy_target" in
+        normalize_rust_target() {
+          case "$$1" in
             x86_64-unknown-linux-gnu.*)
-              legacy_rust_target="x86_64-unknown-linux-gnu"
-              legacy_build_target="$$legacy_target"
+              printf "%s\n" "x86_64-unknown-linux-gnu"
               ;;
             aarch64-unknown-linux-gnu.*)
-              legacy_rust_target="aarch64-unknown-linux-gnu"
-              legacy_build_target="$$legacy_target"
-              ;;
-            x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)
-              legacy_rust_target="$$legacy_target"
-              legacy_build_target="$$legacy_target.2.28"
+              printf "%s\n" "aarch64-unknown-linux-gnu"
               ;;
             *)
-              legacy_rust_target="$$legacy_target"
-              legacy_build_target="$$legacy_target"
+              printf "%s\n" "$$1"
               ;;
           esac
+        }
+
+        derive_build_target() {
+          case "$$1" in
+            x86_64-unknown-linux-gnu.*|aarch64-unknown-linux-gnu.*)
+              printf "%s\n" "$$1"
+              ;;
+            x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)
+              printf "%s.2.28\n" "$$1"
+              ;;
+            *)
+              printf "%s\n" "$$1"
+              ;;
+          esac
+        }
+
+        if [ -n "$$rust_target" ]; then
+          rust_target="$$(normalize_rust_target "$$rust_target")"
         fi
 
-        if [ -z "$$rust_target" ] && [ -n "$$legacy_rust_target" ]; then
-          rust_target="$$legacy_rust_target"
+        if [ -n "$$legacy_target" ]; then
+          if [ -z "$$rust_target" ]; then
+            rust_target="$$(normalize_rust_target "$$legacy_target")"
+          fi
+
+          if [ -z "$$build_target" ]; then
+            build_target="$$(derive_build_target "$$legacy_target")"
+          fi
         fi
 
-        if [ -z "$$build_target" ] && [ -n "$$legacy_build_target" ]; then
-          build_target="$$legacy_build_target"
+        if [ -z "$$rust_target" ] && [ -n "$$build_target" ]; then
+          rust_target="$$(normalize_rust_target "$$build_target")"
+        fi
+
+        if [ -z "$$build_target" ] && [ -n "$$rust_target" ]; then
+          build_target="$$(derive_build_target "$$rust_target")"
         fi
 
         if [ -z "$$rust_target" ]; then
@@ -120,7 +139,13 @@ services:
         fi
 
         if [ -z "$$build_target" ]; then
-          build_target="x86_64-unknown-linux-gnu.2.28"
+          build_target="$$(derive_build_target "$$rust_target")"
+        fi
+
+        expected_rust_target="$$(normalize_rust_target "$$build_target")"
+        if [ "$$expected_rust_target" != "$$rust_target" ]; then
+          echo "ERROR: BUILD_TARGET ($$build_target) maps to $$expected_rust_target, but RUST_TARGET is $$rust_target"
+          exit 1
         fi
 
         rm -f /output/$$OUTPUT_NAME
