@@ -1,6 +1,7 @@
 # Docker Compose for building agent-browser
-# Usage: docker compose -f docker/docker-compose.yml run build-linux
-#        docker compose -f docker/docker-compose.yml run build-windows
+# Usage: pnpm run build:linux
+#        pnpm run build:windows
+# Direct docker compose runs require packages/dashboard/out from pnpm run build:dashboard.
 #
 # Note: macOS builds should be done natively on macOS for compatibility.
 
@@ -18,6 +19,16 @@ services:
     command: |
       -c '
         set -euo pipefail
+
+        require_dashboard_assets() {
+          if [ ! -f /packages/dashboard/out/index.html ]; then
+            echo "ERROR: Dashboard assets are missing."
+            echo "Run pnpm run build:dashboard before using docker compose directly."
+            exit 1
+          fi
+        }
+
+        require_dashboard_assets
         echo "Building for Linux platforms..."
 
         rm -f /output/agent-browser-linux-x64 /output/agent-browser-linux-arm64
@@ -52,6 +63,16 @@ services:
     command: |
       -c '
         set -euo pipefail
+
+        require_dashboard_assets() {
+          if [ ! -f /packages/dashboard/out/index.html ]; then
+            echo "ERROR: Dashboard assets are missing."
+            echo "Run pnpm run build:dashboard before using docker compose directly."
+            exit 1
+          fi
+        }
+
+        require_dashboard_assets
         echo "Building for Windows x64..."
 
         rm -f /output/agent-browser-win32-x64.exe
@@ -82,6 +103,16 @@ services:
     command: |
       -c '
         set -euo pipefail
+
+        require_dashboard_assets() {
+          if [ ! -f /packages/dashboard/out/index.html ]; then
+            echo "ERROR: Dashboard assets are missing."
+            echo "Run pnpm run build:dashboard before using docker compose directly."
+            exit 1
+          fi
+        }
+
+        require_dashboard_assets
 
         rust_target="$${RUST_TARGET:-}"
         build_target="$${BUILD_TARGET:-}"
