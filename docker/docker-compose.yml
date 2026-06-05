@@ -83,13 +83,36 @@ services:
         rust_target="$${RUST_TARGET:-}"
         build_target="$${BUILD_TARGET:-}"
         legacy_target="$${TARGET:-}"
+        legacy_rust_target=""
+        legacy_build_target=""
 
-        if [ -z "$$rust_target" ] && [ -n "$$legacy_target" ]; then
-          rust_target="$$legacy_target"
+        if [ -n "$$legacy_target" ]; then
+          case "$$legacy_target" in
+            x86_64-unknown-linux-gnu.*)
+              legacy_rust_target="x86_64-unknown-linux-gnu"
+              legacy_build_target="$$legacy_target"
+              ;;
+            aarch64-unknown-linux-gnu.*)
+              legacy_rust_target="aarch64-unknown-linux-gnu"
+              legacy_build_target="$$legacy_target"
+              ;;
+            x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)
+              legacy_rust_target="$$legacy_target"
+              legacy_build_target="$$legacy_target.2.28"
+              ;;
+            *)
+              legacy_rust_target="$$legacy_target"
+              legacy_build_target="$$legacy_target"
+              ;;
+          esac
         fi
 
-        if [ -z "$$build_target" ] && [ -n "$$legacy_target" ]; then
-          build_target="$$legacy_target"
+        if [ -z "$$rust_target" ] && [ -n "$$legacy_rust_target" ]; then
+          rust_target="$$legacy_rust_target"
+        fi
+
+        if [ -z "$$build_target" ] && [ -n "$$legacy_build_target" ]; then
+          build_target="$$legacy_build_target"
         fi
 
         if [ -z "$$rust_target" ]; then
