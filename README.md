@@ -1,8 +1,65 @@
-# agent-browser
+# (dark)agent-browser
 
-Browser automation CLI for AI agents. Fast native Rust CLI.
+**A stealth fork of [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser).**
 
-[![skills.sh](https://skills.sh/b/vercel-labs/agent-browser)](https://skills.sh/vercel-labs/agent-browser)
+Same fast native Rust browser-automation CLI for AI agents — but with a built-in
+**[Camoufox](https://camoufox.com) engine** (anti-fingerprinting Firefox) that
+sails past bot-detection and anti-scraping defenses (DataDome, Cloudflare
+fingerprinting, `navigator.webdriver`, headless tells…) which instantly block a
+default Chromium/CDP setup.
+
+> Everything from upstream agent-browser still works. The difference is one flag:
+> `--engine camoufox`. Under the hood it drives Camoufox through a Playwright
+> sidecar that bridges CDP ⇆ Firefox/Juggler, so the page sees a real desktop
+> Firefox with a coherent, rotating fingerprint — not an automated browser.
+
+## Why this fork? Stealth, in pictures
+
+All comparisons below were run from the **same machine and the same IP** — the
+*only* variable is the browser engine. Left = upstream default (Chromium over
+CDP). Right = `--engine camoufox`.
+
+### Leboncoin (protected by DataDome)
+
+The default engine is shown a hard block page; Camoufox loads the real homepage.
+
+| ❌ Default (Chromium/CDP) — **blocked** | ✅ Camoufox — **real site** |
+| :---: | :---: |
+| ![Leboncoin blocks the default engine](assets/camoufox/leboncoin-chrome-blocked.png) | ![Camoufox loads the real Leboncoin homepage](assets/camoufox/leboncoin-camoufox-ok.png) |
+| *"Accès temporairement restreint — le comportement du navigateur nous a intrigué."* | Real listings, categories and menus |
+
+### iphey.com (fingerprint trust score)
+
+| ❌ Default — "Identity Looks **Unreliable**" | ✅ Camoufox — "Identity Looks **Trustworthy**" |
+| :---: | :---: |
+| ![iphey unreliable](assets/camoufox/iphey-chrome-unreliable.png) | ![iphey trustworthy](assets/camoufox/iphey-camoufox-trustworthy.png) |
+
+### bot.sannysoft.com (automation checks)
+
+| ❌ Default — `HeadlessChrome` + `webdriver` detected | ✅ Camoufox — WebDriver/headless pass |
+| :---: | :---: |
+| ![sannysoft default](assets/camoufox/sannysoft-chrome.png) | ![sannysoft camoufox](assets/camoufox/sannysoft-camoufox.png) |
+
+On CreepJS, the Camoufox engine also reports **0% headless / 0% stealth** and
+`chromium: false`, with a self-consistent Firefox fingerprint.
+
+## Quick stealth start
+
+```bash
+agent-browser install camoufox                 # downloads Camoufox + the sidecar deps (needs Node 18+)
+agent-browser --engine camoufox open https://www.leboncoin.fr
+agent-browser snapshot
+agent-browser screenshot out.png --full
+```
+
+See [Camoufox (stealth Firefox) engine](#camoufox-stealth-firefox-engine) for the
+full setup, supported commands, and the
+[sidecar README](packages/camoufox-sidecar/README.md) for the support matrix.
+
+> ⚠️ **Responsible use.** Bypassing bot protection is powerful and dual-use. Use
+> it only where you are authorized: your own sites, security research, QA, or
+> automation that respects each site's Terms of Service, `robots.txt`, rate
+> limits, and applicable laws. You are responsible for how you use this tool.
 
 ## Installation
 
