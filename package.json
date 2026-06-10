@@ -53,11 +53,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Jacqkues/agent-browser.git"
+    "url": "git+https://github.com/Jacqkues/dark-agent-browser.git"
   },
   "bugs": {
-    "url": "https://github.com/Jacqkues/agent-browser/issues"
+    "url": "https://github.com/Jacqkues/dark-agent-browser/issues"
   },
-  "homepage": "https://github.com/Jacqkues/agent-browser",
+  "homepage": "https://github.com/Jacqkues/dark-agent-browser",
   "devDependencies": {}
 }
