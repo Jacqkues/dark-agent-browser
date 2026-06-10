@@ -38,6 +38,10 @@ __pycache__/
 *.webm
 test/e2e/.dogfood-output/
 
+# Keep README example screenshots (override the *.png ignore above)
+!assets/camoufox/
+!assets/camoufox/*.png
+
 # Package manager
 package-lock.json
 yarn.lock
