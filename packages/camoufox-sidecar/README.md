@@ -45,6 +45,15 @@ agent-browser --engine camoufox open https://example.com
 agent-browser snapshot
 ```
 
+### Version compatibility (important)
+
+`playwright-core` is **pinned to `1.51.1`** on purpose. The Playwright Firefox
+client must match the Camoufox Firefox base (currently FF135). Newer Playwright
+(e.g. 1.60) ships a newer Juggler protocol client that mismatches the Camoufox
+build and **crashes when a page raises an uncaught JS error** (common on
+anti-bot pages), aborting navigation. If you bump Camoufox to a newer Firefox
+base, bump `playwright-core` to the matching minor and re-test.
+
 ### Running the sidecar standalone
 
 ```bash
