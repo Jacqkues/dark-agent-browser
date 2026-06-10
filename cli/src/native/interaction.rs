@@ -410,16 +410,26 @@ pub async fn select_option(
     )
     .await?;
 
+    // Matching nothing must be an error, not a silent success: an agent that
+    // selects a misspelled option otherwise sees "Done", and only discovers
+    // the page state is wrong after more commands. List what was available.
     let js = r#"function(vals) {
             const options = Array.from(this.options);
+            let matched = 0;
             for (const opt of options) {
                 opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
+                if (opt.selected) matched += 1;
+            }
+            if (matched === 0) {
+                const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
             this.dispatchEvent(new Event('change', { bubbles: true }));
+            return { matched };
         }"#
     .to_string();
 
-    client
+    let result = client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
@@ -435,6 +445,15 @@ pub async fn select_option(
             Some(&effective_session_id),
         )
         .await?;
+
+    if let Some(error) = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.as_str())
+    {
+        return Err(error.to_string());
+    }
 
     Ok(())
 }
