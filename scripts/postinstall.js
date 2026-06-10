@@ -44,8 +44,8 @@ const packageJson = JSON.parse(
 );
 const version = packageJson.version;
 
-// GitHub release URL
-const GITHUB_REPO = 'vercel-labs/agent-browser';
+// GitHub release URL (this fork publishes its native binaries here)
+const GITHUB_REPO = 'Jacqkues/dark-agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {

@@ -1,15 +1,21 @@
-# agent-browser
+# (dark)agent-browser
 
 ## 0.27.1
 
 <!-- release:start -->
-### Improvements
+First npm release of **(dark)agent-browser**, a stealth fork of
+[vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser).
 
-- Improved **`vitals` command** output formatting for better readability (#1404)
+### New
 
-### Documentation
+- **Camoufox engine** (`--engine camoufox`): drives the anti-fingerprinting
+  [Camoufox](https://camoufox.com) (Firefox) browser through a Playwright
+  sidecar that bridges CDP ⇆ Firefox/Juggler. Sails past bot-detection and
+  anti-scraping checks (DataDome, Cloudflare fingerprinting,
+  `navigator.webdriver`, headless tells) that block a default Chromium/CDP setup.
+- `agent-browser install camoufox` — downloads Camoufox and the sidecar deps.
 
-- Surfaced agent-browser feature coverage in documentation (#1403)
+Everything from upstream agent-browser still works unchanged.
 <!-- release:end -->
 
 ## 0.27.0
