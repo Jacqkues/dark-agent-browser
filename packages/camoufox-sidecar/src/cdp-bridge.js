@@ -259,24 +259,31 @@ export async function startCdpBridge({ browser, context, port, host = '127.0.0.1
         requirePage(page);
         const opts = { type: params.format === 'jpeg' ? 'jpeg' : 'png' };
         if (opts.type === 'jpeg' && typeof params.quality === 'number') opts.quality = params.quality;
-        if (params.clip) {
+        if (params.captureBeyondViewport === true) {
+          // Full-page screenshot. The CLI also sends a `clip` derived from
+          // Page.getLayoutMetrics, but that height can be stale on pages whose
+          // content expands after initial layout (CreepJS, infinite scroll).
+          // Let Playwright measure the real scrollable page itself — `fullPage`
+          // overrides any clip and is the reliable path in Firefox.
+          opts.fullPage = true;
+        } else if (params.clip) {
+          // Element / region screenshot (within the current viewport).
           opts.clip = { x: params.clip.x, y: params.clip.y, width: params.clip.width, height: params.clip.height };
-        } else if (params.captureBeyondViewport === false) {
-          opts.fullPage = false;
         }
         const buf = await page.screenshot(opts);
         return { data: buf.toString('base64') };
       }
       case 'Page.getLayoutMetrics': {
         requirePage(page);
-        const m = await page.evaluate(() => ({
-          w: document.documentElement.scrollWidth,
-          h: document.documentElement.scrollHeight,
-          vw: window.innerWidth,
-          vh: window.innerHeight,
-          sx: window.scrollX,
-          sy: window.scrollY,
-        }));
+        const m = await page.evaluate(() => {
+          const de = document.documentElement;
+          const b = document.body || de;
+          // Use the largest reported extent so the content size reflects the
+          // full scrollable page, not just the documentElement box.
+          const w = Math.max(de.scrollWidth, de.offsetWidth, de.clientWidth, b.scrollWidth, b.offsetWidth);
+          const h = Math.max(de.scrollHeight, de.offsetHeight, de.clientHeight, b.scrollHeight, b.offsetHeight);
+          return { w, h, vw: window.innerWidth, vh: window.innerHeight, sx: window.scrollX, sy: window.scrollY };
+        });
         return {
           cssLayoutViewport: { pageX: m.sx, pageY: m.sy, clientWidth: m.vw, clientHeight: m.vh },
           cssVisualViewport: {

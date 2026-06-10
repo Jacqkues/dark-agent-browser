@@ -83,7 +83,7 @@ use. Verified working against real Camoufox:
 | get url / title / content | `Runtime.evaluate` | ✅ |
 | eval | `Runtime.evaluate` | ✅ |
 | snapshot | `Accessibility.getFullAXTree` (approximated from a DOM walk) | ✅ |
-| screenshot (viewport + full page) | `Page.captureScreenshot`, `Page.getLayoutMetrics` | ✅ |
+| screenshot (viewport + full page) | `Page.captureScreenshot` (`fullPage` via Playwright), `Page.getLayoutMetrics` | ✅ |
 | click (by `@ref` and CSS selector) | `DOM.resolveNode` / `getBoxModel`, `Input.dispatchMouseEvent` | ✅ |
 | fill / type | `Runtime.callFunctionOn`, `Input.dispatchKeyEvent` | ✅ |
 | close | `Browser.close` | ✅ |
@@ -96,6 +96,9 @@ handling:
 
 - Full DOM domain (`DOM.querySelectorAll`, mutation events) — only the minimal
   pieces needed for element resolution are implemented.
+- Full-page screenshots use Playwright's `fullPage` (reliable height), but
+  Firefox caps a single screenshot at ~4096px tall; pages taller than that are
+  captured up to the cap.
 - Network interception / mocking, request/response events.
 - `Page.printToPDF` (Firefox PDF generation differs).
 - CPU/heap profiling, tracing, video/HAR recording.
