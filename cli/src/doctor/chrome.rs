@@ -110,6 +110,27 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                     .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
                 );
             }
+        } else if engine == "camoufox" {
+            // The Camoufox engine needs Node on PATH plus the sidecar; the
+            // browser binary itself is downloaded by `install camoufox`.
+            if which_exists("node") {
+                checks.push(Check::new(
+                    "chrome.engine_camoufox",
+                    category,
+                    Status::Pass,
+                    "Node.js on PATH for the Camoufox sidecar",
+                ));
+            } else {
+                checks.push(
+                    Check::new(
+                        "chrome.engine_camoufox",
+                        category,
+                        Status::Fail,
+                        "AGENT_BROWSER_ENGINE=camoufox but Node.js is not on PATH",
+                    )
+                    .with_fix("install Node 18+ then run `agent-browser install camoufox`"),
+                );
+            }
         }
     }
 }

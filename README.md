@@ -78,6 +78,39 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 - **Node.js 24+ and pnpm 11+** - Only needed when building from source.
 - **Rust** - Only needed when building from source (see From Source above).
 
+## Camoufox (stealth Firefox) engine
+
+In addition to Chrome and Lightpanda, `agent-browser` can drive
+[Camoufox](https://camoufox.com/) — a Firefox-based, anti-fingerprinting browser
+designed to evade bot detection. Camoufox spoofs the navigator, WebGL, screen,
+fonts and WebRTC fingerprints at the C++ level, and `navigator.webdriver` reads
+as `false`.
+
+Because Camoufox speaks Firefox's Juggler protocol (via Playwright) rather than
+CDP, it runs behind a small Node **sidecar** (in
+[`packages/camoufox-sidecar`](packages/camoufox-sidecar)) that bridges CDP ⇆
+Camoufox. The CLI talks to it exactly as it would to Chrome.
+
+```bash
+# One-time setup: installs the sidecar deps + downloads the Camoufox browser
+agent-browser install camoufox
+
+# Then use it like any other engine
+agent-browser --engine camoufox open https://example.com
+agent-browser snapshot
+agent-browser --engine camoufox click @e1
+```
+
+Requirements: **Node.js 18+** on `PATH` (the sidecar runtime). The Camoufox
+browser build is downloaded by `install camoufox`.
+
+Supported on the Camoufox engine today: `open`/`navigate`, `get url/title/content`,
+`eval`, `snapshot`, `screenshot` (viewport + full page), `click` (by `@ref` and
+CSS selector), `fill`/`type`, and `close`. Advanced features (network mocking,
+PDF, profiling, recording, multi-tab routing, extensions, Chrome profiles) are
+not yet ported — see the [sidecar README](packages/camoufox-sidecar/README.md)
+for the full support matrix.
+
 ## Quick Start
 
 ```bash
@@ -737,7 +770,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
+| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda`, `camoufox` (or `AGENT_BROWSER_ENGINE` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -1223,7 +1256,7 @@ agent-browser uses a client-daemon architecture:
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations. To auto-shutdown the daemon after a period of inactivity, set `AGENT_BROWSER_IDLE_TIMEOUT_MS` (value in milliseconds). When set, the daemon closes the browser and exits after receiving no commands for the specified duration.
 
-**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
+**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome`, `lightpanda`, and `camoufox` (stealth Firefox, via the Playwright sidecar). Supported browsers: Chromium/Chrome (via CDP), Camoufox/Firefox (via CDP↔Playwright bridge) and Safari (via WebDriver for iOS).
 
 ## Platforms
 

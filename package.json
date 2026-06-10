@@ -12,7 +12,10 @@
     "bin",
     "scripts",
     "skill-data",
-    "skills"
+    "skills",
+    "packages/camoufox-sidecar/src",
+    "packages/camoufox-sidecar/package.json",
+    "packages/camoufox-sidecar/README.md"
   ],
   "bin": {
     "agent-browser": "./bin/agent-browser.js"

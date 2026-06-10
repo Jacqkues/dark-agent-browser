@@ -497,6 +497,111 @@ pub fn run_install(with_deps: bool) {
     }
 }
 
+/// Set up the Camoufox engine: install the Node sidecar's dependencies
+/// (camoufox-js, playwright-core, ws) and download the Camoufox browser build.
+pub fn run_install_camoufox() {
+    // Node is required to run the sidecar.
+    let node_ok = Command::new("node")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !node_ok {
+        eprintln!(
+            "{} Node.js 18+ is required for the Camoufox engine but was not found on PATH.",
+            color::error_indicator()
+        );
+        eprintln!("  Install Node from https://nodejs.org and re-run: agent-browser install camoufox");
+        exit(1);
+    }
+
+    let entry = match crate::native::cdp::camoufox::find_sidecar_entry() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{} {}", color::error_indicator(), e);
+            exit(1);
+        }
+    };
+    // entry = <pkg>/src/index.js  ->  pkg dir is two levels up.
+    let pkg_dir = entry
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    println!("{}", color::cyan("Installing Camoufox sidecar dependencies..."));
+    println!("  {}", pkg_dir.display());
+
+    // Use npm to install the leaf sidecar package's dependencies. npm is the
+    // most widely available and, unlike running pnpm inside this monorepo, it
+    // does not pull in the whole workspace or trip the pnpm approve-builds gate.
+    let pm = if Command::new("npm")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        "npm"
+    } else {
+        "pnpm"
+    };
+
+    let mut install_cmd = Command::new(pm);
+    install_cmd.arg("install");
+    if pm == "npm" {
+        install_cmd.arg("--no-audit").arg("--no-fund");
+    }
+    let install_status = install_cmd.current_dir(&pkg_dir).status();
+    match install_status {
+        Ok(s) if s.success() => {
+            println!("{} Sidecar dependencies installed", color::success_indicator());
+        }
+        Ok(_) => {
+            eprintln!(
+                "{} `{} install` failed in {}",
+                color::error_indicator(),
+                pm,
+                pkg_dir.display()
+            );
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("{} Could not run {}: {}", color::error_indicator(), pm, e);
+            exit(1);
+        }
+    }
+
+    println!("{}", color::cyan("Downloading Camoufox browser..."));
+    let fetch_status = Command::new("node")
+        .arg(pkg_dir.join("src").join("fetch.js"))
+        .current_dir(&pkg_dir)
+        .status();
+    match fetch_status {
+        Ok(s) if s.success() => {
+            println!(
+                "{} Camoufox is installed. Use it with: agent-browser --engine camoufox open <url>",
+                color::success_indicator()
+            );
+        }
+        Ok(_) => {
+            eprintln!(
+                "{} Camoufox browser download failed. Try manually: cd {} && npx camoufox-js fetch",
+                color::error_indicator(),
+                pkg_dir.display()
+            );
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("{} Could not download Camoufox: {}", color::error_indicator(), e);
+            exit(1);
+        }
+    }
+}
+
 fn report_install_status(status: io::Result<std::process::ExitStatus>) {
     match status {
         Ok(s) if s.success() => {

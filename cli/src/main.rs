@@ -556,6 +556,12 @@ fn main() {
 
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
+        // `install camoufox` sets up the Firefox-based Camoufox engine instead
+        // of downloading Chrome for Testing.
+        if clean.get(1).map(|s| s.as_str()) == Some("camoufox") {
+            install::run_install_camoufox();
+            return;
+        }
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
         run_install(with_deps);
         return;

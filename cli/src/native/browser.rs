@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
+use super::cdp::camoufox::{launch_camoufox, CamoufoxLaunchOptions, CamoufoxProcess};
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
@@ -84,6 +85,35 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
         return Err(
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
         );
+    }
+    Ok(())
+}
+
+/// Validates that unsupported options are not used with the Camoufox engine.
+///
+/// Camoufox is Firefox-based and driven via the Playwright sidecar, so
+/// Chrome-specific concepts (extensions, Chrome user-data profiles, storage
+/// state import, file:// access) are not wired up yet. Proxy, user-agent,
+/// viewport, headed/headless and custom args ARE supported.
+fn validate_camoufox_options(options: &LaunchOptions) -> Result<(), String> {
+    if options
+        .extensions
+        .as_ref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+    {
+        return Err("Extensions are not supported with the Camoufox engine yet".to_string());
+    }
+    if options.profile.is_some() {
+        return Err(
+            "Chrome profiles are not supported with the Camoufox engine (Firefox uses a different profile format)".to_string(),
+        );
+    }
+    if options.storage_state.is_some() {
+        return Err("Storage state import is not supported with the Camoufox engine yet".to_string());
+    }
+    if options.allow_file_access {
+        return Err("File access is not supported with the Camoufox engine".to_string());
     }
     Ok(())
 }
@@ -265,6 +295,7 @@ impl WaitUntil {
 pub enum BrowserProcess {
     Chrome(ChromeProcess),
     Lightpanda(LightpandaProcess),
+    Camoufox(CamoufoxProcess),
 }
 
 impl BrowserProcess {
@@ -272,6 +303,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.kill(),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::Camoufox(p) => p.kill(),
         }
     }
 
@@ -279,6 +311,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::Camoufox(p) => p.kill(),
         }
     }
 
@@ -287,6 +320,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.has_exited(),
             BrowserProcess::Lightpanda(_) => false,
+            BrowserProcess::Camoufox(_) => false,
         }
     }
 }
@@ -329,9 +363,12 @@ impl BrowserManager {
             "lightpanda" => {
                 validate_lightpanda_options(&options)?;
             }
+            "camoufox" => {
+                validate_camoufox_options(&options)?;
+            }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, camoufox",
                     engine
                 ));
             }
@@ -353,6 +390,23 @@ impl BrowserManager {
                 let url = lp.ws_url.clone();
                 (url, BrowserProcess::Lightpanda(lp))
             }
+            "camoufox" => {
+                let cf_options = CamoufoxLaunchOptions {
+                    executable_path: options.executable_path.clone(),
+                    headless: options.headless,
+                    proxy: options.proxy.clone(),
+                    proxy_username: options.proxy_username.clone(),
+                    proxy_password: options.proxy_password.clone(),
+                    user_agent: options.user_agent.clone(),
+                    ignore_https_errors: options.ignore_https_errors,
+                    viewport_size: options.viewport_size,
+                    color_scheme: options.color_scheme.clone(),
+                    extra_args: options.args.clone(),
+                };
+                let cf = launch_camoufox(&cf_options).await?;
+                let url = cf.ws_url.clone();
+                (url, BrowserProcess::Camoufox(cf))
+            }
             _ => {
                 let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
                     .await
@@ -364,6 +418,8 @@ impl BrowserManager {
 
         let manager = if engine == "lightpanda" {
             initialize_lightpanda_manager(ws_url, process).await?
+        } else if engine == "camoufox" {
+            initialize_camoufox_manager(ws_url, process).await?
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
@@ -1634,6 +1690,72 @@ async fn initialize_lightpanda_manager(
     }
 }
 
+/// Connect to the Camoufox sidecar's CDP endpoint and attach to its initial
+/// page target. Mirrors the Lightpanda initializer: the sidecar may need a
+/// moment to finish launching Firefox, so we retry the connect + target
+/// discovery until a shared deadline.
+async fn initialize_camoufox_manager(
+    ws_url: String,
+    process: BrowserProcess,
+) -> Result<BrowserManager, String> {
+    let deadline = Instant::now() + LIGHTPANDA_TARGET_INIT_TIMEOUT;
+    let mut process = Some(process);
+
+    loop {
+        let client = match connect_cdp_with_retry(
+            &ws_url,
+            LIGHTPANDA_CDP_CONNECT_TIMEOUT,
+            LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(format!("Failed to connect to the Camoufox sidecar: {}", err));
+                }
+                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                continue;
+            }
+        };
+
+        let mut manager = BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: ws_url.clone(),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+        };
+
+        match run_with_lightpanda_deadline(
+            deadline,
+            manager.discover_and_attach_targets(),
+            "Camoufox target initialization exceeded the remaining startup deadline",
+        )
+        .await
+        {
+            Ok(()) => {
+                manager.browser_process = process.take();
+                return Ok(manager);
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "Timed out waiting for the Camoufox sidecar to initialize: {}",
+                        err
+                    ));
+                }
+                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
 async fn discover_and_attach_lightpanda_targets(
     manager: &mut BrowserManager,
     deadline: Instant,
@@ -1908,6 +2030,46 @@ mod tests {
     #[test]
     fn test_validate_launch_options_valid() {
         assert!(validate_launch_options(None, false, None, None, false, None,).is_ok());
+    }
+
+    #[test]
+    fn test_validate_camoufox_rejects_extensions() {
+        let opts = LaunchOptions {
+            extensions: Some(vec!["/ext".to_string()]),
+            ..LaunchOptions::default()
+        };
+        assert!(validate_camoufox_options(&opts).is_err());
+    }
+
+    #[test]
+    fn test_validate_camoufox_rejects_profile() {
+        let opts = LaunchOptions {
+            profile: Some("/profile".to_string()),
+            ..LaunchOptions::default()
+        };
+        assert!(validate_camoufox_options(&opts).is_err());
+    }
+
+    #[test]
+    fn test_validate_camoufox_rejects_storage_state() {
+        let opts = LaunchOptions {
+            storage_state: Some("/state.json".to_string()),
+            ..LaunchOptions::default()
+        };
+        assert!(validate_camoufox_options(&opts).is_err());
+    }
+
+    #[test]
+    fn test_validate_camoufox_accepts_proxy_and_user_agent() {
+        // Proxy, user-agent, headed mode and custom args ARE supported.
+        let opts = LaunchOptions {
+            proxy: Some("http://127.0.0.1:8080".to_string()),
+            user_agent: Some("custom-ua".to_string()),
+            headless: false,
+            args: vec!["-headless".to_string()],
+            ..LaunchOptions::default()
+        };
+        assert!(validate_camoufox_options(&opts).is_ok());
     }
 
     #[test]

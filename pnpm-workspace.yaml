@@ -1,6 +1,10 @@
 packages:
   - '.'
   - 'packages/*'
+  # The Camoufox sidecar manages its own dependencies via `agent-browser
+  # install camoufox` (npm), so it is intentionally excluded from the pnpm
+  # workspace to avoid pulling Playwright/Camoufox into the main install.
+  - '!packages/camoufox-sidecar'
   - 'docs'
 minimumReleaseAge: 2880
 allowBuilds:
