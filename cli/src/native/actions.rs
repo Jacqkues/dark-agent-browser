@@ -309,7 +309,7 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             launch_hash: None,
-            engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
+            engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "camoufox".to_string()),
             default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
@@ -1536,7 +1536,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         ));
     }
 
-    state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+    state.engine = engine.as_deref().unwrap_or("camoufox").to_string();
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file(&state.session_id);
 
@@ -2072,7 +2072,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         *df = Some(DomainFilter::new(domains));
     }
 
-    state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+    state.engine = engine.as_deref().unwrap_or("camoufox").to_string();
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file(&state.session_id);
     state.reset_input_state();

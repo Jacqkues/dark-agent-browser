@@ -347,7 +347,9 @@ const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
-        let engine = engine.unwrap_or("chrome");
+        // (dark)agent-browser defaults to the stealth Camoufox engine. Use
+        // `--engine chrome` (or AGENT_BROWSER_ENGINE=chrome) for upstream Chrome.
+        let engine = engine.unwrap_or("camoufox");
 
         match engine {
             "chrome" => {

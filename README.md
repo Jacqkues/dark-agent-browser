@@ -8,10 +8,11 @@ sails past bot-detection and anti-scraping defenses (DataDome, Cloudflare
 fingerprinting, `navigator.webdriver`, headless tells…) which instantly block a
 default Chromium/CDP setup.
 
-> Everything from upstream agent-browser still works. The difference is one flag:
-> `--engine camoufox`. Under the hood it drives Camoufox through a Playwright
+> Everything from upstream agent-browser still works. Here, the **Camoufox
+> engine is the default** — under the hood it drives Camoufox through a Playwright
 > sidecar that bridges CDP ⇆ Firefox/Juggler, so the page sees a real desktop
-> Firefox with a coherent, rotating fingerprint — not an automated browser.
+> Firefox with a coherent, rotating fingerprint — not an automated browser. Need
+> upstream behavior? Use `--engine chrome` (or `AGENT_BROWSER_ENGINE=chrome`).
 
 ## Why this fork? Stealth, in pictures
 
@@ -69,7 +70,7 @@ Installs the native Rust binary:
 
 ```bash
 npm install -g agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
+agent-browser install  # Install the Camoufox stealth engine (default; first time only)
 ```
 
 ### Project Installation (local dependency)
@@ -87,14 +88,14 @@ Then use via `package.json` scripts or by invoking `agent-browser` directly.
 
 ```bash
 brew install agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
+agent-browser install  # Install the Camoufox stealth engine (default; first time only)
 ```
 
 ### Cargo (Rust)
 
 ```bash
 cargo install agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
+agent-browser install  # Install the Camoufox stealth engine (default; first time only)
 ```
 
 ### From Source
@@ -543,8 +544,9 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 ### Setup
 
 ```bash
-agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
-agent-browser install --with-deps     # Also install system deps (Linux)
+agent-browser install                 # Install the Camoufox stealth engine (default)
+agent-browser install chrome          # Download Chrome from Chrome for Testing (for --engine chrome)
+agent-browser install chrome --with-deps  # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
 agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)

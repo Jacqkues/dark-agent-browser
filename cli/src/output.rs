@@ -3159,8 +3159,10 @@ Dashboard:
   dashboard stop             Stop the dashboard server
 
 Setup:
-  install                    Install browser binaries
-  install --with-deps        Also install system dependencies (Linux)
+  install                    Install the Camoufox stealth engine (default)
+  install camoufox           Same as `install` (download Camoufox + sidecar deps)
+  install chrome             Download Chrome for Testing (for --engine chrome)
+  install chrome --with-deps Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
   doctor [--fix]             Diagnose install; auto-clean stale files
   dashboard start            Start the observability dashboard
@@ -3220,8 +3222,8 @@ Options:
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
-  --engine <name>            Browser engine: chrome (default), lightpanda, camoufox (or AGENT_BROWSER_ENGINE)
-                             camoufox = stealth Firefox; run `agent-browser install camoufox` first
+  --engine <name>            Browser engine: camoufox (default, stealth Firefox), chrome, lightpanda (or AGENT_BROWSER_ENGINE)
+                             camoufox needs `agent-browser install` first; use chrome for upstream behavior
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -3286,7 +3288,7 @@ Environment:
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
-  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda, camoufox
+  AGENT_BROWSER_ENGINE           Browser engine: camoufox (default), chrome, lightpanda
   AGENT_BROWSER_CAMOUFOX_SIDECAR Path to the Camoufox sidecar src/index.js (overrides auto-detection)
   HTTP_PROXY / HTTPS_PROXY       Standard proxy env vars (fallback if AGENT_BROWSER_PROXY not set)
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
@@ -3302,7 +3304,7 @@ Install:
   npm install -g agent-browser           # npm
   brew install agent-browser             # Homebrew
   cargo install agent-browser            # Cargo
-  agent-browser install                  # Download Chrome (first time)
+  agent-browser install                  # Install Camoufox stealth engine (first time)
 
 Examples:
   agent-browser open example.com

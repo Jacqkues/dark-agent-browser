@@ -554,16 +554,20 @@ fn main() {
         return;
     }
 
-    // Handle install separately
+    // Handle install separately.
+    //
+    // (dark)agent-browser defaults to the stealth Camoufox engine, so a bare
+    // `install` (or `install camoufox`) sets up Camoufox. Use `install chrome`
+    // to download Chrome for Testing for the upstream `--engine chrome` path.
     if clean.first().map(|s| s.as_str()) == Some("install") {
-        // `install camoufox` sets up the Firefox-based Camoufox engine instead
-        // of downloading Chrome for Testing.
-        if clean.get(1).map(|s| s.as_str()) == Some("camoufox") {
-            install::run_install_camoufox();
-            return;
+        match clean.get(1).map(|s| s.as_str()) {
+            Some("chrome") => {
+                let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
+                run_install(with_deps);
+            }
+            // Default (no arg) and explicit `camoufox` both install Camoufox.
+            _ => install::run_install_camoufox(),
         }
-        let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        run_install(with_deps);
         return;
     }
 
