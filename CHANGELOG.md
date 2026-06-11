@@ -1,8 +1,16 @@
 # (dark)agent-browser
 
-## 0.27.1
+## 0.27.2
 
 <!-- release:start -->
+- Relax the npm `engines` requirement to Node `>=18` (the native binary needs no
+  Node at runtime; the Camoufox sidecar runs on Node 18+). Removes the
+  `EBADENGINE` install warning.
+<!-- release:end -->
+
+## 0.27.1
+
+<!-- release:noop -->
 First npm release of **(dark)agent-browser**, a stealth fork of
 [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser).
 
