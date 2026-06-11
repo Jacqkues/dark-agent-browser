@@ -497,6 +497,47 @@ pub fn run_install(with_deps: bool) {
     }
 }
 
+/// True if both paths resolve to the same directory (best-effort).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// Copy the sidecar's `src/` and `package.json` from `source` into `target`,
+/// so the runtime copy lives in a user-writable location. `node_modules` is not
+/// copied (it is reinstalled fresh at `target`).
+fn stage_sidecar(source: &Path, target: &Path) -> io::Result<()> {
+    let src_index = source.join("src").join("index.js");
+    if !src_index.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no src/index.js under {}", source.display()),
+        ));
+    }
+    fs::create_dir_all(target)?;
+    copy_dir_recursive(&source.join("src"), &target.join("src"))?;
+    fs::copy(source.join("package.json"), target.join("package.json"))?;
+    Ok(())
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
 /// Set up the Camoufox engine: install the Node sidecar's dependencies
 /// (camoufox-js, playwright-core, ws) and download the Camoufox browser build.
 pub fn run_install_camoufox() {
@@ -524,12 +565,41 @@ pub fn run_install_camoufox() {
             exit(1);
         }
     };
-    // entry = <pkg>/src/index.js  ->  pkg dir is two levels up.
-    let pkg_dir = entry
+    // entry = <src-pkg>/src/index.js  ->  source package dir is two levels up.
+    let source_dir = entry
         .parent()
         .and_then(|p| p.parent())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+
+    // Install into a user-writable location (~/.agent-browser/camoufox-sidecar),
+    // which is also the first place the runtime looks. This avoids npm-installing
+    // inside the (possibly read-only) global npm package directory when
+    // agent-browser was installed with `npm install -g`.
+    let target_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".agent-browser")
+        .join("camoufox-sidecar");
+
+    let pkg_dir = if same_dir(&source_dir, &target_dir) {
+        source_dir.clone()
+    } else {
+        println!(
+            "{}",
+            color::cyan("Setting up the Camoufox sidecar in ~/.agent-browser...")
+        );
+        if let Err(e) = stage_sidecar(&source_dir, &target_dir) {
+            eprintln!(
+                "{} Failed to stage the Camoufox sidecar from {} to {}: {}",
+                color::error_indicator(),
+                source_dir.display(),
+                target_dir.display(),
+                e
+            );
+            exit(1);
+        }
+        target_dir.clone()
+    };
 
     println!("{}", color::cyan("Installing Camoufox sidecar dependencies..."));
     println!("  {}", pkg_dir.display());

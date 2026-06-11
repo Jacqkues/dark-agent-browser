@@ -1,6 +1,6 @@
 {
   "name": "dark-agent-browser",
-  "version": "0.27.2",
+  "version": "0.27.3",
   "description": "(dark)agent-browser — a stealth fork of vercel-labs/agent-browser with a Camoufox engine that bypasses bot-detection and anti-scraping defenses",
   "type": "module",
   "packageManager": "pnpm@11.1.3",

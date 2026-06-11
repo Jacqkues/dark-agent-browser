@@ -110,9 +110,16 @@ pub fn find_sidecar_entry() -> Result<PathBuf, String> {
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join(&rel));
     }
-    // Walk up from the executable directory looking for the workspace package.
+    // Walk up from the executable directory looking for the package.
+    //
+    // On global npm installs, postinstall replaces npm's bin symlink so it
+    // points straight at the native binary inside the package
+    // (…/node_modules/dark-agent-browser/bin/agent-browser-<platform>). Resolve
+    // symlinks first (current_exe may hand back the symlink path itself), so the
+    // walk reaches the package root that holds packages/camoufox-sidecar.
     if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(PathBuf::from);
+        let resolved = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let mut dir = resolved.parent().map(PathBuf::from);
         for _ in 0..6 {
             let Some(d) = dir else { break };
             candidates.push(d.join(&rel));

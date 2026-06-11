@@ -1,8 +1,21 @@
 # (dark)agent-browser
 
-## 0.27.2
+## 0.27.3
 
 <!-- release:start -->
+Fix `agent-browser install` (Camoufox setup) for global npm installs.
+
+- Locate the bundled sidecar even when npm's bin symlink points straight at the
+  native binary: resolve symlinks (`canonicalize`) before walking up to the
+  package root.
+- Stage the sidecar into `~/.agent-browser/camoufox-sidecar/` (user-writable,
+  and the runtime's preferred location) and run `npm install` + the Camoufox
+  download there, instead of writing into the global npm package directory.
+<!-- release:end -->
+
+## 0.27.2
+
+<!-- release:noop -->
 - Relax the npm `engines` requirement to Node `>=18` (the native binary needs no
   Node at runtime; the Camoufox sidecar runs on Node 18+). Removes the
   `EBADENGINE` install warning.
