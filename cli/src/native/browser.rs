@@ -130,7 +130,9 @@ fn validate_camoufox_options(options: &LaunchOptions) -> Result<(), String> {
         );
     }
     if options.storage_state.is_some() {
-        return Err("Storage state import is not supported with the Camoufox engine yet".to_string());
+        return Err(
+            "Storage state import is not supported with the Camoufox engine yet".to_string(),
+        );
     }
     if options.allow_file_access {
         return Err("File access is not supported with the Camoufox engine".to_string());
@@ -2458,7 +2460,10 @@ async fn initialize_camoufox_manager(
             Ok(client) => client,
             Err(err) => {
                 if Instant::now() >= deadline {
-                    return Err(format!("Failed to connect to the Camoufox sidecar: {}", err));
+                    return Err(format!(
+                        "Failed to connect to the Camoufox sidecar: {}",
+                        err
+                    ));
                 }
                 tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
                 continue;

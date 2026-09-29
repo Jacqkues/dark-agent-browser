@@ -185,9 +185,7 @@ fn build_sidecar_args(options: &CamoufoxLaunchOptions) -> Vec<String> {
     args
 }
 
-pub async fn launch_camoufox(
-    options: &CamoufoxLaunchOptions,
-) -> Result<CamoufoxProcess, String> {
+pub async fn launch_camoufox(options: &CamoufoxLaunchOptions) -> Result<CamoufoxProcess, String> {
     let node = find_node()?;
     let sidecar = find_sidecar_entry()?;
     let args = {
