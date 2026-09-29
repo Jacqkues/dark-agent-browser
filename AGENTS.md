@@ -15,6 +15,8 @@ This project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for ins
 
 ## Documentation
 
+Do not hard-wrap prose in documentation files such as Markdown, MDX, and READMEs; let the editor or renderer wrap text naturally.
+
 When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
 
 1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
@@ -24,6 +26,10 @@ When adding or changing user-facing features (new flags, commands, behaviors, en
 5. Inline doc comments in the relevant source files
 
 This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
+
+## CLI/MCP Parity
+
+When adding or changing any CLI command, flag, behavior, output, environment variable, or parser semantics, update the MCP server in `cli/src/mcp.rs` in the same change. MCP tools should stay in sync with canonical CLI behavior by delegating through the normal CLI parser where possible. If a CLI command has no dedicated MCP tool, add one or document why it is intentionally omitted. Add or update tests that prove the CLI and MCP surfaces remain aligned.
 
 In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
 
@@ -121,68 +127,6 @@ The e2e tests live in `cli/src/native/e2e_tests.rs` and cover: launch/close, nav
 cd cli && cargo fmt -- --check   # Check formatting
 cd cli && cargo clippy            # Lint
 ```
-
-## Windows Debugging
-
-A remote Windows Server 2022 EC2 instance is available for debugging Windows-specific issues. It uses AWS Systems Manager (SSM) with no SSH or open ports. Commands run via `aws ssm send-command` and return stdout/stderr.
-
-### Prerequisites
-
-The instance must be provisioned first (one-time, by a human):
-
-```bash
-./scripts/windows-debug/provision.sh
-```
-
-Requires: AWS CLI v2 configured with `ec2:*`, `iam:CreateRole`, `iam:AttachRolePolicy`, `ssm:SendCommand`, `ssm:GetCommandInvocation` permissions and a default VPC.
-
-### Usage
-
-Start the instance (if stopped):
-
-```bash
-./scripts/windows-debug/start.sh
-```
-
-Run a command on Windows:
-
-```bash
-./scripts/windows-debug/run.sh "<powershell-command>"
-```
-
-Sync the current git branch and rebuild:
-
-```bash
-./scripts/windows-debug/sync.sh
-```
-
-Stop the instance when done (avoids cost):
-
-```bash
-./scripts/windows-debug/stop.sh
-```
-
-### Common Workflows
-
-Run unit tests on Windows:
-
-```bash
-./scripts/windows-debug/run.sh "cd C:\agent-browser && cargo test --manifest-path cli\Cargo.toml"
-```
-
-Run e2e tests on Windows:
-
-```bash
-./scripts/windows-debug/run.sh "cd C:\agent-browser && cargo test e2e --manifest-path cli\Cargo.toml -- --ignored --test-threads=1"
-```
-
-Check bootstrap progress (first boot only):
-
-```bash
-./scripts/windows-debug/run.sh "Get-Content C:\bootstrap.log"
-```
-
-The repo lives at `C:\agent-browser` on the instance. Rust, Git, and Chrome are pre-installed. The `run.sh` wrapper automatically adds cargo and git to PATH.
 
 <!-- opensrc:start -->
 

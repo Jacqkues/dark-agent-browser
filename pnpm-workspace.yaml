@@ -1,12 +1,18 @@
 packages:
   - '.'
   - 'packages/*'
+  - 'packages/@agent-browser/*'
   # The Camoufox sidecar manages its own dependencies via `agent-browser
   # install camoufox` (npm), so it is intentionally excluded from the pnpm
   # workspace to avoid pulling Playwright/Camoufox into the main install.
   - '!packages/camoufox-sidecar'
   - 'docs'
 minimumReleaseAge: 2880
+# First-party packages are exempt so @agent-browser/eve can depend on a
+# just-released @agent-browser/sandbox without waiting out the release age.
+minimumReleaseAgeExclude:
+  - '@agent-browser/sandbox'
+  - eve
 allowBuilds:
   '@mongodb-js/zstd': false
   msw: false

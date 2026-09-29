@@ -1,4 +1,5 @@
 use crate::color;
+use crate::plugins::PluginConfig;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -58,6 +59,12 @@ pub struct Config {
     pub debug: Option<bool>,
     pub session: Option<String>,
     pub session_name: Option<String>,
+    pub restore: Option<String>,
+    pub restore_save: Option<String>,
+    pub restore_check_url: Option<String>,
+    pub restore_check_text: Option<String>,
+    pub restore_check_fn: Option<String>,
+    pub namespace: Option<String>,
     pub executable_path: Option<String>,
     pub extensions: Option<Vec<String>>,
     pub init_scripts: Option<Vec<String>>,
@@ -71,10 +78,15 @@ pub struct Config {
     pub provider: Option<String>,
     pub device: Option<String>,
     pub hide_scrollbars: Option<bool>,
+    pub webgpu: Option<bool>,
+    pub no_webmcp: Option<bool>,
     pub ignore_https_errors: Option<bool>,
+    pub ca_cert: Option<String>,
+    pub clear_ca_cert: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
+    pub pin_tab: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
     pub color_scheme: Option<String>,
@@ -92,16 +104,32 @@ pub struct Config {
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
+    pub plugins: Option<Vec<PluginConfig>>,
 }
 
 impl Config {
     fn merge(self, other: Config) -> Config {
+        let (ca_cert, clear_ca_cert) = if other.ca_cert.is_some() {
+            (other.ca_cert, Some(false))
+        } else {
+            match other.clear_ca_cert {
+                Some(true) => (None, Some(true)),
+                Some(false) => (self.ca_cert, Some(false)),
+                None => (self.ca_cert, self.clear_ca_cert),
+            }
+        };
         Config {
             headed: other.headed.or(self.headed),
             json: other.json.or(self.json),
             debug: other.debug.or(self.debug),
             session: other.session.or(self.session),
             session_name: other.session_name.or(self.session_name),
+            restore: other.restore.or(self.restore),
+            restore_save: other.restore_save.or(self.restore_save),
+            restore_check_url: other.restore_check_url.or(self.restore_check_url),
+            restore_check_text: other.restore_check_text.or(self.restore_check_text),
+            restore_check_fn: other.restore_check_fn.or(self.restore_check_fn),
+            namespace: other.namespace.or(self.namespace),
             executable_path: other.executable_path.or(self.executable_path),
             extensions: match (self.extensions, other.extensions) {
                 (Some(mut a), Some(b)) => {
@@ -133,10 +161,15 @@ impl Config {
             provider: other.provider.or(self.provider),
             device: other.device.or(self.device),
             hide_scrollbars: other.hide_scrollbars.or(self.hide_scrollbars),
+            webgpu: other.webgpu.or(self.webgpu),
+            no_webmcp: other.no_webmcp.or(self.no_webmcp),
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
+            ca_cert,
+            clear_ca_cert,
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
+            pin_tab: other.pin_tab.or(self.pin_tab),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
             color_scheme: other.color_scheme.or(self.color_scheme),
@@ -154,6 +187,13 @@ impl Config {
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
+            plugins: match (self.plugins, other.plugins) {
+                (Some(mut a), Some(b)) => {
+                    a.extend(b);
+                    Some(a)
+                }
+                (a, b) => b.or(a),
+            },
         }
     }
 }
@@ -195,6 +235,26 @@ fn env_var_bool(name: &str) -> Option<bool> {
         .map(|val| !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""))
 }
 
+fn resolve_ca_cert(
+    config_ca_cert: Option<String>,
+    config_clear_ca_cert: Option<bool>,
+    env_ca_cert: Option<String>,
+    env_clear_ca_cert: Option<bool>,
+) -> (Option<String>, bool) {
+    if let Some(ca_cert) = env_ca_cert {
+        (Some(ca_cert), false)
+    } else if let Some(clear_ca_cert) = env_clear_ca_cert {
+        (
+            if clear_ca_cert { None } else { config_ca_cert },
+            clear_ca_cert,
+        )
+    } else if let Some(ca_cert) = config_ca_cert {
+        (Some(ca_cert), false)
+    } else {
+        (None, config_clear_ca_cert.unwrap_or(false))
+    }
+}
+
 /// Parse an optional boolean value after a flag. Returns (value, consumed_next_arg).
 /// Recognizes "true" as true, "false" as false. Bare flag defaults to true.
 fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
@@ -220,6 +280,11 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
+        "--restore-save",
+        "--restore-check-url",
+        "--restore-check-text",
+        "--restore-check-fn",
+        "--namespace",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -243,10 +308,12 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--action-policy",
         "--confirm-actions",
         "--engine",
+        "--input-mode",
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ca-cert",
         "--model",
     ];
     let mut i = 0;
@@ -299,6 +366,13 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
+    pub restore: Option<String>,
+    pub restore_save: Option<String>,
+    pub restore_check_url: Option<String>,
+    pub restore_check_text: Option<String>,
+    pub restore_check_fn: Option<String>,
+    pub namespace: Option<String>,
+    pub restore_uses_session: bool,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
@@ -313,10 +387,18 @@ pub struct Flags {
     pub user_agent: Option<String>,
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<String>,
+    pub clear_ca_cert: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
+    pub webgpu: bool,
+    pub no_webmcp: bool,
+    /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
+    /// launches on displayless Linux hosts.
+    pub no_xvfb: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub pin_tab: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
     pub color_scheme: Option<String>,
@@ -335,8 +417,11 @@ pub struct Flags {
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
     pub model: Option<String>,
+    pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
     pub quiet: bool,
+    /// Session input behavior selected with `--input-mode`.
+    pub input_mode: String,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -350,11 +435,21 @@ pub struct Flags {
     pub cli_user_agent: bool,
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
+    pub cli_ca_cert: bool,
     pub cli_allow_file_access: bool,
     pub cli_hide_scrollbars: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
+    pub cli_webgpu: bool,
+    pub cli_no_webmcp: bool,
+    pub cli_restore: bool,
+    /// True when --pin-tab / --no-pin-tab was passed on the command line, so
+    /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
+    /// just means "absent" and must not override a sticky pin).
+    pub cli_pin_tab: bool,
+    /// True when `--input-mode` was explicitly passed, including `instant`.
+    pub cli_input_mode: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -411,6 +506,30 @@ pub fn parse_flags(args: &[String]) -> Flags {
         config.enable.unwrap_or_default()
     };
 
+    let plugins = env::var("AGENT_BROWSER_PLUGINS")
+        .ok()
+        .and_then(
+            |raw| match serde_json::from_str::<Vec<PluginConfig>>(&raw) {
+                Ok(plugins) => Some(plugins),
+                Err(e) => {
+                    eprintln!(
+                        "{} invalid AGENT_BROWSER_PLUGINS value: {}",
+                        color::warning_indicator(),
+                        e
+                    );
+                    None
+                }
+            },
+        )
+        .unwrap_or_else(|| config.plugins.unwrap_or_default());
+
+    let (ca_cert, clear_ca_cert) = resolve_ca_cert(
+        config.ca_cert,
+        config.clear_ca_cert,
+        env::var("AGENT_BROWSER_CA_CERT").ok(),
+        env_var_bool("AGENT_BROWSER_CLEAR_CA_CERT"),
+    );
+
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
@@ -419,11 +538,28 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
+        restore: env::var("AGENT_BROWSER_RESTORE").ok().or(config.restore),
+        restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
+            .ok()
+            .or(config.restore_save),
+        restore_check_url: env::var("AGENT_BROWSER_RESTORE_CHECK_URL")
+            .ok()
+            .or(config.restore_check_url),
+        restore_check_text: env::var("AGENT_BROWSER_RESTORE_CHECK_TEXT")
+            .ok()
+            .or(config.restore_check_text),
+        restore_check_fn: env::var("AGENT_BROWSER_RESTORE_CHECK_FN")
+            .ok()
+            .or(config.restore_check_fn),
+        namespace: env::var("AGENT_BROWSER_NAMESPACE")
+            .ok()
+            .or(config.namespace),
+        restore_uses_session: false,
         headers: config.headers,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
             .ok()
             .or(config.executable_path),
-        cdp: config.cdp,
+        cdp: env::var("AGENT_BROWSER_CDP").ok().or(config.cdp),
         extensions,
         init_scripts,
         enable,
@@ -450,14 +586,21 @@ pub fn parse_flags(args: &[String]) -> Flags {
         provider: env::var("AGENT_BROWSER_PROVIDER").ok().or(config.provider),
         ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
+        ca_cert,
+        clear_ca_cert,
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
             .or(config.hide_scrollbars)
             .unwrap_or(true),
+        webgpu: env_var_is_truthy("AGENT_BROWSER_WEBGPU") || config.webgpu.unwrap_or(false),
+        no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
+            || config.no_webmcp.unwrap_or(false),
+        no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
+        pin_tab: env_var_is_truthy("AGENT_BROWSER_PIN_TAB") || config.pin_tab.unwrap_or(false),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
             .or(config.session_name),
@@ -514,8 +657,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
+        plugins,
         verbose: false,
         quiet: false,
+        input_mode: "instant".to_string(),
         cli_executable_path: false,
         cli_extensions: false,
         cli_init_scripts: false,
@@ -526,16 +671,37 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_user_agent: false,
         cli_proxy: false,
         cli_proxy_bypass: false,
+        cli_ca_cert: false,
         cli_allow_file_access: false,
         cli_hide_scrollbars: false,
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        cli_webgpu: false,
+        cli_no_webmcp: false,
+        cli_restore: false,
+        cli_pin_tab: false,
+        cli_input_mode: false,
     };
 
     let mut i = 0;
+    let mut seen_command = false;
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = args[i].as_str();
+        if !arg.starts_with('-') && looks_like_command(arg) {
+            seen_command = true;
+        }
+        match arg {
+            s if s.starts_with("--restore=") => {
+                flags.cli_restore = true;
+                let value = s.trim_start_matches("--restore=");
+                if value.is_empty() {
+                    flags.restore_uses_session = true;
+                } else {
+                    flags.restore = Some(value.to_string());
+                    flags.restore_uses_session = false;
+                }
+            }
             "--json" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.json = val;
@@ -551,6 +717,22 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--webgpu" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.webgpu = val;
+                flags.cli_webgpu = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-webmcp" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.no_webmcp = val;
+                flags.cli_no_webmcp = true;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--debug" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.debug = val;
@@ -561,6 +743,53 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--restore" => {
+                flags.cli_restore = true;
+                let next = args.get(i + 1);
+                if seen_command {
+                    flags.restore_uses_session = true;
+                } else if let Some(s) = next {
+                    if !s.starts_with('-') && !looks_like_command(s) {
+                        flags.restore = Some(s.clone());
+                        flags.restore_uses_session = false;
+                        i += 1;
+                    } else {
+                        flags.restore_uses_session = true;
+                    }
+                } else {
+                    flags.restore_uses_session = true;
+                }
+            }
+            "--restore-save" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_save = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--restore-check-url" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_check_url = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--restore-check-text" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_check_text = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--restore-check-fn" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_check_fn = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--namespace" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.namespace = Some(s.clone());
                     i += 1;
                 }
             }
@@ -679,6 +908,25 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--ca-cert" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.ca_cert = Some(s.clone());
+                    flags.clear_ca_cert = false;
+                    flags.cli_ca_cert = true;
+                    i += 1;
+                }
+            }
+            "--no-ca-cert" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.clear_ca_cert = val;
+                if val {
+                    flags.ca_cert = None;
+                }
+                flags.cli_ca_cert = true;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--allow-file-access" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
@@ -704,6 +952,22 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--pin-tab" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.pin_tab = val;
+                flags.cli_pin_tab = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-pin-tab" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.pin_tab = !val;
+                flags.cli_pin_tab = true;
                 if consumed {
                     i += 1;
                 }
@@ -786,6 +1050,21 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--input-mode" => {
+                if let Some(s) = args.get(i + 1) {
+                    if matches!(s.as_str(), "instant" | "smooth" | "human") {
+                        flags.input_mode = s.clone();
+                        flags.cli_input_mode = true;
+                    } else {
+                        eprintln!(
+                            "{} --input-mode must be instant, smooth, or human, got '{}'",
+                            color::warning_indicator(),
+                            s
+                        );
+                    }
+                    i += 1;
+                }
+            }
             "--screenshot-dir" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.screenshot_dir = Some(s.clone());
@@ -852,6 +1131,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
     flags
 }
 
+fn looks_like_command(value: &str) -> bool {
+    crate::commands::is_top_level_command(value)
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
@@ -860,11 +1143,16 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     const GLOBAL_BOOL_FLAGS: &[&str] = &[
         "--json",
         "--headed",
+        "--webgpu",
+        "--no-webmcp",
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
         "--hide-scrollbars",
         "--auto-connect",
+        "--pin-tab",
+        "--no-pin-tab",
+        "--no-ca-cert",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
@@ -881,6 +1169,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
+        "--restore-save",
+        "--restore-check-url",
+        "--restore-check-text",
+        "--restore-check-fn",
+        "--namespace",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -905,14 +1198,17 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--confirm-actions",
         "--config",
         "--engine",
+        "--input-mode",
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ca-cert",
         "--model",
     ];
 
     let mut i = 0;
+    let mut seen_command = false;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -920,8 +1216,23 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
+        if arg.starts_with("--restore=") {
+            i += 1;
+            continue;
+        }
         if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
             skip_next = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--restore" {
+            if !seen_command {
+                if let Some(v) = args.get(i + 1) {
+                    if !v.starts_with('-') && !looks_like_command(v) {
+                        i += 1;
+                    }
+                }
+            }
             i += 1;
             continue;
         }
@@ -933,6 +1244,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             }
             i += 1;
             continue;
+        }
+        if !arg.starts_with('-') && looks_like_command(arg) {
+            seen_command = true;
         }
         result.push(arg.clone());
         i += 1;
@@ -1051,6 +1365,85 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_restore_without_value_uses_session() {
+        let input = args("--session next-loop --restore open http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_restore_with_explicit_key() {
+        let input = args("--restore login-state open http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.restore.as_deref(), Some("login-state"));
+        assert!(!flags.restore_uses_session);
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_restore_after_command_does_not_consume_url() {
+        let input = args("--session next-loop open --restore http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_restore_equals_with_explicit_key_after_command() {
+        let input = args("open --restore=login-state http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.restore.as_deref(), Some("login-state"));
+        assert!(!flags.restore_uses_session);
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_bare_restore_before_auth_command_uses_session() {
+        let input = args("--session next-loop --restore auth list");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["auth", "list"]);
+    }
+
+    #[test]
+    fn test_parse_bare_restore_before_hover_command_uses_session() {
+        let input = args("--session next-loop --restore hover button");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["hover", "button"]);
+    }
+
+    #[test]
+    fn test_parse_restore_policy_checks_and_namespace() {
+        let input = args(
+            "--namespace work-a --restore-save never --restore-check-url **/dashboard --restore-check-text Dashboard --restore-check-fn window.ok open",
+        );
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.namespace.as_deref(), Some("work-a"));
+        assert_eq!(flags.restore_save.as_deref(), Some("never"));
+        assert_eq!(flags.restore_check_url.as_deref(), Some("**/dashboard"));
+        assert_eq!(flags.restore_check_text.as_deref(), Some("Dashboard"));
+        assert_eq!(flags.restore_check_fn.as_deref(), Some("window.ok"));
+        assert_eq!(clean_args(&input), vec!["open"]);
+    }
+
+    #[test]
     fn test_parse_executable_path_flag() {
         let flags = parse_flags(&args(
             "--executable-path /path/to/chromium open example.com",
@@ -1084,6 +1477,14 @@ mod tests {
     fn test_clean_args_removes_idle_timeout_before_command() {
         let cleaned = clean_args(&args("--idle-timeout 10s open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_record_fps() {
+        // --fps belongs to `record`, so it must reach the command parser even
+        // when global flags are mixed in.
+        let cleaned = clean_args(&args("--json record start demo.webm --fps 60"));
+        assert_eq!(cleaned, vec!["record", "start", "demo.webm", "--fps", "60"]);
     }
 
     #[test]
@@ -1192,7 +1593,15 @@ mod tests {
             "allowFileAccess": true,
             "cdp": "9222",
             "autoConnect": true,
-            "headers": "{\"Auth\":\"token\"}"
+            "headers": "{\"Auth\":\"token\"}",
+            "plugins": [
+                {
+                    "name": "onepassword",
+                    "command": "agent-browser-plugin-1password",
+                    "args": ["--account", "team"],
+                    "capabilities": ["credential.read"]
+                }
+            ]
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.headed, Some(true));
@@ -1219,6 +1628,14 @@ mod tests {
         assert_eq!(config.cdp.as_deref(), Some("9222"));
         assert_eq!(config.auto_connect, Some(true));
         assert_eq!(config.headers.as_deref(), Some("{\"Auth\":\"token\"}"));
+        let plugin = &config.plugins.as_ref().unwrap()[0];
+        assert_eq!(plugin.name, "onepassword");
+        assert_eq!(plugin.command, "agent-browser-plugin-1password");
+        assert_eq!(
+            plugin.args,
+            vec!["--account".to_string(), "team".to_string()]
+        );
+        assert_eq!(plugin.capabilities, vec!["credential.read".to_string()]);
     }
 
     #[test]
@@ -1443,6 +1860,53 @@ mod tests {
     }
 
     #[test]
+    fn test_webgpu_default_false() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(!flags.webgpu);
+        assert!(!flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_webgpu_bare_defaults_true() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args("--webgpu open example.com"));
+        assert!(flags.webgpu);
+        assert!(flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_webgpu_false_explicit() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args("--webgpu false open example.com"));
+        assert!(!flags.webgpu);
+        assert!(flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_cdp_env_var_resolves_into_flags() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_CDP"]);
+        guard.set("AGENT_BROWSER_CDP", "9222");
+        let flags = parse_flags(&args("open example.com"));
+        assert_eq!(flags.cdp.as_deref(), Some("9222"));
+        guard.remove("AGENT_BROWSER_CDP");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.cdp.is_none());
+    }
+
+    #[test]
+    fn test_webgpu_env_var() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.set("AGENT_BROWSER_WEBGPU", "1");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.webgpu);
+        assert!(!flags.cli_webgpu);
+    }
+
+    #[test]
     fn test_debug_false() {
         let flags = parse_flags(&args("--debug false open example.com"));
         assert!(!flags.debug);
@@ -1560,6 +2024,159 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ca_cert_flag() {
+        let flags = parse_flags(&args("--ca-cert /path/to/ca.crt open example.com"));
+        assert_eq!(flags.ca_cert, Some("/path/to/ca.crt".to_string()));
+        assert!(!flags.clear_ca_cert);
+    }
+
+    #[test]
+    fn test_parse_no_ca_cert_flag() {
+        let flags = parse_flags(&args(
+            "--ca-cert /path/to/ca.crt --no-ca-cert open example.com",
+        ));
+        assert_eq!(flags.ca_cert, None);
+        assert!(flags.clear_ca_cert);
+        assert!(flags.cli_ca_cert);
+    }
+
+    #[test]
+    fn test_parse_ca_cert_flag_no_value() {
+        let flags = parse_flags(&args("--ca-cert"));
+        assert_eq!(flags.ca_cert, None);
+    }
+
+    #[test]
+    fn test_clean_args_removes_ca_cert() {
+        let cleaned = clean_args(&args(
+            "--ca-cert /path/to/ca.crt --no-ca-cert open example.com",
+        ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_config_merge_ca_cert() {
+        let user = Config {
+            ca_cert: Some("/user/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let project = Config::default();
+        let merged = user.merge(project);
+        assert_eq!(merged.ca_cert, Some("/user/ca.crt".to_string()));
+
+        // Project overrides user
+        let user = Config {
+            ca_cert: Some("/user/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let project = Config {
+            ca_cert: Some("/project/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let merged = user.merge(project);
+        assert_eq!(merged.ca_cert, Some("/project/ca.crt".to_string()));
+    }
+
+    #[test]
+    fn test_config_ca_cert_and_clear_merge_as_one_decision() {
+        let user = Config {
+            ca_cert: Some("/user/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let project_clear = Config {
+            clear_ca_cert: Some(true),
+            ..Config::default()
+        };
+        let cleared = user.merge(project_clear);
+        assert_eq!(cleared.ca_cert, None);
+        assert_eq!(cleared.clear_ca_cert, Some(true));
+
+        let user_clear = Config {
+            clear_ca_cert: Some(true),
+            ..Config::default()
+        };
+        let project_ca = Config {
+            ca_cert: Some("/project/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let selected = user_clear.merge(project_ca);
+        assert_eq!(selected.ca_cert, Some("/project/ca.crt".to_string()));
+        assert_eq!(selected.clear_ca_cert, Some(false));
+
+        let user_clear = Config {
+            clear_ca_cert: Some(true),
+            ..Config::default()
+        };
+        let project_disable_clear = Config {
+            clear_ca_cert: Some(false),
+            ..Config::default()
+        };
+        let disabled = user_clear.merge(project_disable_clear);
+        assert_eq!(disabled.ca_cert, None);
+        assert_eq!(disabled.clear_ca_cert, Some(false));
+    }
+
+    #[test]
+    fn test_ca_cert_precedence() {
+        let cases = [
+            (
+                None,
+                Some(true),
+                Some("/env/ca.crt".to_string()),
+                None,
+                Some("/env/ca.crt".to_string()),
+                false,
+            ),
+            (
+                Some("/config/ca.crt".to_string()),
+                None,
+                None,
+                Some(true),
+                None,
+                true,
+            ),
+            (
+                Some("/config/ca.crt".to_string()),
+                None,
+                None,
+                Some(false),
+                Some("/config/ca.crt".to_string()),
+                false,
+            ),
+            (
+                Some("/config/ca.crt".to_string()),
+                Some(true),
+                None,
+                None,
+                Some("/config/ca.crt".to_string()),
+                false,
+            ),
+            (None, Some(true), None, None, None, true),
+            (None, None, None, None, None, false),
+        ];
+
+        for (
+            config_ca_cert,
+            config_clear_ca_cert,
+            env_ca_cert,
+            env_clear_ca_cert,
+            expected_ca_cert,
+            expected_clear_ca_cert,
+        ) in cases
+        {
+            assert_eq!(
+                resolve_ca_cert(
+                    config_ca_cert,
+                    config_clear_ca_cert,
+                    env_ca_cert,
+                    env_clear_ca_cert,
+                ),
+                (expected_ca_cert, expected_clear_ca_cert)
+            );
+        }
+    }
+
+    #[test]
     fn test_no_auto_dialog_flag() {
         let flags = parse_flags(&args("open example.com --no-auto-dialog"));
         assert!(flags.no_auto_dialog);
@@ -1580,5 +2197,32 @@ mod tests {
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_no_webmcp_flag() {
+        let flags = parse_flags(&args("--no-webmcp open example.com"));
+        assert!(flags.no_webmcp);
+        assert!(flags.cli_no_webmcp);
+        assert_eq!(
+            clean_args(&args("--no-webmcp open example.com")),
+            args("open example.com")
+        );
+    }
+
+    #[test]
+    fn test_input_mode_is_explicit_and_removed_from_command_args() {
+        let input = args("--input-mode human open example.com");
+        let flags = parse_flags(&input);
+        assert_eq!(flags.input_mode, "human");
+        assert!(flags.cli_input_mode);
+        assert_eq!(clean_args(&input), args("open example.com"));
+    }
+
+    #[test]
+    fn test_input_mode_defaults_without_overwriting_session() {
+        let flags = parse_flags(&args("click @e1"));
+        assert_eq!(flags.input_mode, "instant");
+        assert!(!flags.cli_input_mode);
     }
 }
