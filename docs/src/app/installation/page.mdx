@@ -57,6 +57,12 @@ pnpm build:native
 pnpm link --global
 ```
 
+## Windows browser sessions
+
+Headless Chrome runs on a private Windows desktop. This prevents hidden browser windows from leaving visible rectangles on your desktop, including with affected Chrome 150 builds. It applies to bundled and custom Chrome executables and to windows created later in the session. Automation, screenshots, and GPU rendering continue through CDP.
+
+Use `--headed` to show Chrome on the interactive desktop. Sessions with extensions also use the interactive desktop. Agent-browser owns the Chrome processes it launches: Windows terminates the entire Chrome tree when its daemon exits or is forcibly killed. Browsers attached with `--cdp` or `--auto-connect` remain externally owned.
+
 ## Linux dependencies
 
 On Linux, install system dependencies:
@@ -64,6 +70,8 @@ On Linux, install system dependencies:
 ```bash
 agent-browser install --with-deps
 ```
+
+This exits nonzero if the package manager cannot install every required browser library.
 
 ## Updating
 
@@ -83,6 +91,7 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 agent-browser doctor                     # Full diagnosis
 agent-browser doctor --offline --quick   # Local-only, fastest (~<1s)
 agent-browser doctor --fix               # Also run destructive repairs
+agent-browser doctor --webgpu            # Also run a live WebGPU render probe
 agent-browser doctor --json              # Structured output
 ```
 
@@ -101,6 +110,7 @@ It checks:
 <tr><td>Providers</td><td>Env vars for Browserless, Browserbase, Browser Use, Kernel, AgentCore (AWS creds), Appium (for <code>--provider ios</code>), and <code>AI_GATEWAY_API_KEY</code> for chat</td></tr>
 <tr><td>Network</td><td>Reachability of the Chrome for Testing CDN, AI Gateway (if configured), and any currently selected provider endpoint (skipped under <code>--offline</code>)</td></tr>
 <tr><td>Launch test</td><td>Spawns a scratch session, launches headless Chrome, navigates to <code>about:blank</code>, then closes. Measures wall time (skipped under <code>--quick</code>)</td></tr>
+<tr><td>WebGPU probe</td><td>Opt-in via <code>--webgpu</code>: launches a scratch session with the <a href="/webgpu">WebGPU preset</a>, renders through a real WebGPU pass, and pixel-checks both an offscreen readback and a decoded screenshot. Add <code>--headed</code> to validate the headed/Xvfb capture path</td></tr>
 </tbody>
 </table>
 

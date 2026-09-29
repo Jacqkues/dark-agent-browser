@@ -10,10 +10,10 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{json, Value};
 
 use super::helpers::new_id;
-use super::{Check, Status};
+use super::{Check, DoctorOptions, Status};
 use crate::connection::{cleanup_stale_files, ensure_daemon, send_command, DaemonOptions};
 
-pub(super) fn check(checks: &mut Vec<Check>) {
+pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
     let category = "Launch test";
 
     if env::var("AGENT_BROWSER_PROVIDER").is_ok() {
@@ -50,9 +50,9 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     // one `cleanup_stale_files`.
     let mut _guard: Option<LaunchGuard> = None;
 
-    let opts = DaemonOptions {
+    let daemon_opts = DaemonOptions {
         headed: false,
-        debug: false,
+        debug: opts.debug,
         executable_path: None,
         extensions: &[],
         init_scripts: &[],
@@ -66,25 +66,32 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         ignore_https_errors: false,
         allow_file_access: false,
         hide_scrollbars: true,
+        webgpu: false,
         profile: None,
         state: None,
         provider: None,
         device: None,
         session_name: None,
+        restore_save: None,
+        restore_check_url: None,
+        restore_check_text: None,
+        restore_check_fn: None,
         download_path: None,
         allowed_domains: None,
         action_policy: None,
         confirm_actions: None,
         engine: None,
         auto_connect: false,
+        pin_tab: false,
         idle_timeout: None,
         default_timeout: None,
         cdp: None,
         no_auto_dialog: false,
+        plugins: None,
     };
 
     let started = Instant::now();
-    if let Err(e) = ensure_daemon(&session, &opts) {
+    if let Err(e) = ensure_daemon(&session, &daemon_opts) {
         checks.push(
             Check::new(
                 "launch.daemon",

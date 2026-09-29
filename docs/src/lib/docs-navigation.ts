@@ -22,7 +22,9 @@ export const navigation: NavSection[] = [
     title: "Reference",
     items: [
       { name: "Commands", href: "/commands" },
+      { name: "WebMCP", href: "/webmcp" },
       { name: "Configuration", href: "/configuration" },
+      { name: "Plugins", href: "/plugins" },
       { name: "Selectors", href: "/selectors" },
       { name: "Snapshots", href: "/snapshots" },
     ],
@@ -37,6 +39,7 @@ export const navigation: NavSection[] = [
       { name: "CDP Mode", href: "/cdp-mode" },
       { name: "Streaming", href: "/streaming" },
       { name: "Video Recording", href: "/recording" },
+      { name: "WebGPU", href: "/webgpu" },
       { name: "Debugging", href: "/debugging" },
       { name: "Profiler", href: "/profiler" },
       { name: "React & Web Vitals", href: "/react" },
@@ -46,6 +49,7 @@ export const navigation: NavSection[] = [
       { name: "iOS Simulator", href: "/ios" },
       { name: "Security", href: "/security" },
       { name: "Next.js + Vercel", href: "/next" },
+      { name: "eve Extension", href: "/eve" },
       { name: "Native Mode", href: "/native-mode" },
     ],
   },
@@ -57,6 +61,10 @@ export const navigation: NavSection[] = [
       { name: "Browserbase", href: "/providers/browserbase" },
       { name: "Browserless", href: "/providers/browserless" },
       { name: "Kernel", href: "/providers/kernel" },
+      {
+        name: "Remote Agent Browser",
+        href: "/providers/remote-agent-browser",
+      },
     ],
   },
   {

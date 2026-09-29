@@ -5,9 +5,14 @@
 
 use serde_json::{json, Value};
 use std::env;
+use std::time::Duration;
+
+const BROWSER_USE_API_BASE: &str = "https://api.browser-use.com/api/v4";
+const BROWSER_USE_CREATE_DEADLINE: Duration = Duration::from_secs(10);
+const BROWSER_USE_STOP_DEADLINE: Duration = Duration::from_secs(4);
 
 /// Provider session info for cleanup on failure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProviderSession {
     pub provider: String,
     pub session_id: String,
@@ -19,11 +24,35 @@ pub struct ProviderConnection {
     pub session: Option<ProviderSession>,
     /// If true, the WebSocket IS the page session (no Target.* commands).
     pub direct_page: bool,
+    pub metadata: Option<Value>,
 }
 
 /// Connects to the specified browser provider and returns a CDP WebSocket URL
 /// along with session info for cleanup on failure.
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
+    let plugins = crate::plugins::plugins_from_env();
+    connect_provider_with_plugins(provider_name, &plugins).await
+}
+
+/// Connects to a built-in provider or a plugin provider from the supplied
+/// registry. Callers that already loaded config must use this helper so policy
+/// checks and provider execution consult the same plugin list.
+pub async fn connect_provider_with_plugins(
+    provider_name: &str,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<ProviderConnection, String> {
+    connect_provider_with_plugins_and_options(provider_name, plugins, None).await
+}
+
+/// Connects to a built-in provider or plugin provider with launch options
+/// supplied by the command that requested the provider. Built-in providers keep
+/// their existing environment-based behavior; plugin providers receive these
+/// options in the stdio protocol request.
+pub async fn connect_provider_with_plugins_and_options(
+    provider_name: &str,
+    plugins: &[crate::plugins::PluginConfig],
+    launch_options: Option<Value>,
+) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
         "browserbase" => {
             let (url, session) = connect_browserbase().await?;
@@ -31,6 +60,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                metadata: None,
             })
         }
         "browserless" => {
@@ -39,6 +69,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                metadata: None,
             })
         }
         "browser-use" | "browseruse" => {
@@ -47,6 +78,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                metadata: None,
             })
         }
         "kernel" => {
@@ -55,6 +87,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                metadata: None,
             })
         }
         "agentcore" => {
@@ -63,17 +96,36 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                metadata: None,
             })
         }
-        _ => Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore",
-            provider_name
-        )),
+        _ => {
+            connect_plugin_provider_with_plugins_and_options(provider_name, plugins, launch_options)
+                .await
+        }
     }
 }
 
 /// Close a provider session (call on CDP connect failure).
-pub async fn close_provider_session(session: &ProviderSession) {
+pub async fn close_provider_session(session: &ProviderSession) -> Result<(), String> {
+    let plugins = crate::plugins::plugins_from_env();
+    close_provider_session_with_plugins(session, &plugins).await
+}
+
+/// Close a provider session with the plugin registry that created it.
+pub async fn close_provider_session_with_plugins(
+    session: &ProviderSession,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    if let Some(plugin_name) = session.provider.strip_prefix("plugin:") {
+        if let Ok(cleanup) = serde_json::from_str::<Value>(&session.session_id) {
+            let _ =
+                crate::plugins::close_browser_provider_with_plugins(plugin_name, plugins, cleanup)
+                    .await;
+        }
+        return Ok(());
+    }
+
     let client = reqwest::Client::new();
     match session.provider.as_str() {
         "browserbase" => {
@@ -91,18 +143,12 @@ pub async fn close_provider_session(session: &ProviderSession) {
             }
         }
         "browser-use" => {
-            if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
-                let _ = client
-                    .patch(format!(
-                        "https://api.browser-use.com/api/v2/browsers/{}",
-                        session.session_id
-                    ))
-                    .header("X-Browser-Use-API-Key", &api_key)
-                    .header("Content-Type", "application/json")
-                    .json(&json!({ "action": "stop" }))
-                    .send()
-                    .await;
-            }
+            return stop_browser_use_session_at(
+                BROWSER_USE_API_BASE,
+                &session.session_id,
+                BROWSER_USE_STOP_DEADLINE,
+            )
+            .await;
         }
         "browserless" => {
             // session_id holds the stop URL for browserless
@@ -128,6 +174,77 @@ pub async fn close_provider_session(session: &ProviderSession) {
             let _ = close_agentcore_session(&session.session_id).await;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+pub async fn connect_plugin_provider_with_plugins(
+    provider_name: &str,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<ProviderConnection, String> {
+    connect_plugin_provider_with_plugins_and_options(provider_name, plugins, None).await
+}
+
+pub async fn connect_plugin_provider_with_plugins_and_options(
+    provider_name: &str,
+    plugins: &[crate::plugins::PluginConfig],
+    launch_options: Option<Value>,
+) -> Result<ProviderConnection, String> {
+    if crate::plugins::find_plugin(plugins, provider_name).is_none() {
+        return Err(format!(
+            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore, or a configured plugin with browser.provider",
+            provider_name
+        ));
+    }
+
+    let mut plugin_launch_options = serde_json::Map::new();
+    plugin_launch_options.insert(
+        "headed".to_string(),
+        json!(env_var_is_truthy("AGENT_BROWSER_HEADED")),
+    );
+    plugin_launch_options.insert(
+        "engine".to_string(),
+        json!(env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string())),
+    );
+    plugin_launch_options.insert(
+        "userAgent".to_string(),
+        json!(env::var("AGENT_BROWSER_USER_AGENT").ok()),
+    );
+    plugin_launch_options.insert(
+        "colorScheme".to_string(),
+        json!(env::var("AGENT_BROWSER_COLOR_SCHEME").ok()),
+    );
+
+    if let Some(Value::Object(command_options)) = launch_options {
+        for (key, value) in command_options {
+            plugin_launch_options.insert(key, value);
+        }
+    }
+
+    let request = json!({
+        "provider": provider_name,
+        "session": env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
+        "launchOptions": Value::Object(plugin_launch_options),
+    });
+    let browser =
+        crate::plugins::connect_browser_provider_with_plugins(provider_name, plugins, request)
+            .await?;
+    let session = browser.cleanup.as_ref().map(|cleanup| ProviderSession {
+        provider: format!("plugin:{}", provider_name),
+        session_id: serde_json::to_string(cleanup).unwrap_or_else(|_| "{}".to_string()),
+    });
+    Ok(ProviderConnection {
+        ws_url: browser.cdp_url,
+        session,
+        direct_page: browser.direct_page,
+        metadata: browser.metadata,
+    })
+}
+
+fn env_var_is_truthy(name: &str) -> bool {
+    match env::var(name) {
+        Ok(val) => !matches!(val.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""),
+        Err(_) => false,
     }
 }
 
@@ -265,12 +382,138 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
 }
 
 async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
-    let api_key = env::var("BROWSER_USE_API_KEY")
+    connect_browser_use_at(BROWSER_USE_API_BASE, BROWSER_USE_CREATE_DEADLINE).await
+}
+
+fn browser_use_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Browser Use HTTP client could not be initialized".to_string())
+}
+
+async fn browser_use_response(request: reqwest::RequestBuilder) -> Result<Value, String> {
+    fn safe_error(error: reqwest::Error) -> String {
+        if error.is_timeout() {
+            "request timed out"
+        } else if error.is_decode() {
+            "invalid response"
+        } else {
+            "request failed"
+        }
+        .to_string()
+    }
+    let response = request.send().await.map_err(safe_error)?;
+    if !response.status().is_success() {
+        return Err(format!("API error (status {})", response.status().as_u16()));
+    }
+    response.json().await.map_err(safe_error)
+}
+
+async fn connect_browser_use_at(
+    base: &str,
+    deadline: Duration,
+) -> Result<(String, Option<ProviderSession>), String> {
+    let key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
+    let unknown = |error| {
+        format!("Browser Use create {error}; the browser may still have been created; inspect Browser Use Cloud before retrying")
+    };
+    let response = browser_use_response(
+        browser_use_client()?
+            .post(format!("{base}/browsers"))
+            .header("X-Browser-Use-API-Key", &key)
+            .timeout(deadline)
+            .json(&browser_use_create_body_from_lookup(|name| {
+                env::var(name).ok()
+            })),
+    )
+    .await
+    .map_err(unknown)?;
+    let id = response["id"]
+        .as_str()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .filter(|id| Some(*id) != uuid::Uuid::parse_str(&key).ok())
+        .ok_or_else(|| unknown("response did not contain a valid browser id".to_string()))?;
+    Ok((
+        response["cdpUrl"].as_str().unwrap_or_default().to_string(),
+        Some(ProviderSession {
+            provider: "browser-use".to_string(),
+            session_id: id.to_string(),
+        }),
+    ))
+}
 
-    let ws_url = format!("wss://connect.browser-use.com?apiKey={}", api_key);
+async fn stop_browser_use_session_at(
+    base: &str,
+    session_id: &str,
+    deadline: Duration,
+) -> Result<(), String> {
+    let id = uuid::Uuid::parse_str(session_id)
+        .map_err(|_| "Browser Use session id is not a valid UUID")?;
+    let key = env::var("BROWSER_USE_API_KEY").map_err(|_| {
+        format!("BROWSER_USE_API_KEY is not set; Browser Use browser {id} was not stopped")
+    })?;
+    if uuid::Uuid::parse_str(&key).ok() == Some(id) {
+        return Err("Browser Use session identity matches a credential".to_string());
+    }
+    let response = browser_use_response(
+        browser_use_client()?
+            .patch(format!("{base}/browsers/{id}"))
+            .header("X-Browser-Use-API-Key", key)
+            .timeout(deadline)
+            .json(&json!({ "action": "stop" })),
+    )
+    .await
+    .map_err(|error| format!("Browser Use stop {error} for browser {id}"))?;
+    if response["id"]
+        .as_str()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        != Some(id)
+        || response["status"] != "stopped"
+    {
+        return Err(format!(
+            "Browser Use did not acknowledge browser {id} as stopped"
+        ));
+    }
+    Ok(())
+}
 
-    Ok((ws_url, None))
+fn browser_use_create_body_from_lookup<F>(mut lookup: F) -> Value
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut body = serde_json::Map::new();
+
+    if let Some(profile_id) = lookup("BROWSER_USE_PROFILE_ID").filter(|value| !value.is_empty()) {
+        body.insert("profileId".to_string(), json!(profile_id));
+    }
+
+    if let Some(proxy_country) =
+        lookup("BROWSER_USE_PROXY_COUNTRY").filter(|value| !value.is_empty())
+    {
+        let proxy_country = proxy_country.to_ascii_lowercase();
+        body.insert(
+            "proxyCountryCode".to_string(),
+            if matches!(proxy_country.as_str(), "none" | "direct") {
+                Value::Null
+            } else {
+                json!(proxy_country)
+            },
+        );
+    }
+
+    if let Some(recording) = lookup("BROWSER_USE_ENABLE_RECORDING") {
+        body.insert(
+            "enableRecording".to_string(),
+            json!(!matches!(
+                recording.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | ""
+            )),
+        );
+    }
+
+    Value::Object(body)
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
@@ -750,11 +993,229 @@ async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
+    use std::io::{Read, Write};
+
+    const TEST_BROWSER_ID: &str = "0e6ae5d0-93cf-4b9c-8c62-2c9c07b6c0f7";
+
+    fn browser_use_env() -> EnvGuard<'static> {
+        let vars = [
+            "BROWSER_USE_API_KEY",
+            "BROWSER_USE_PROFILE_ID",
+            "BROWSER_USE_PROXY_COUNTRY",
+            "BROWSER_USE_ENABLE_RECORDING",
+        ];
+        let guard = EnvGuard::new(&vars);
+        for name in vars {
+            guard.remove(name);
+        }
+        guard.set("BROWSER_USE_API_KEY", "test-key-do-not-echo");
+        guard
+    }
+
+    fn browser_use_server(
+        status: u16,
+        body: &str,
+        stall: bool,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let body = body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = String::new();
+            let mut reader = std::io::BufReader::new(&stream);
+            loop {
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+                request.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let length = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            request.push_str(std::str::from_utf8(&bytes).unwrap());
+            let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", if stall { body.len() + 10 } else { body.len() });
+            let _ = stream.write_all(response.as_bytes());
+            if stall {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            request
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_v4_protocol() {
+        let guard = browser_use_env();
+        guard.set("BROWSER_USE_PROFILE_ID", "profile-123");
+        guard.set("BROWSER_USE_PROXY_COUNTRY", "DE");
+        guard.set("BROWSER_USE_ENABLE_RECORDING", "true");
+        for endpoint in [
+            "wss://example.com/cdp",
+            "https://example.com",
+            "ws://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            "",
+        ] {
+            let body = json!({"id":TEST_BROWSER_ID,"cdpUrl":endpoint});
+            let (base, server) = browser_use_server(201, &body.to_string(), false);
+            let (url, session) = connect_browser_use_at(&base, Duration::from_secs(2))
+                .await
+                .unwrap();
+            assert_eq!(url, endpoint);
+            assert_eq!(session.unwrap().session_id, TEST_BROWSER_ID);
+            let request = server.join().unwrap();
+            assert!(request.starts_with("POST /browsers HTTP/1.1"));
+            assert!(request
+                .to_lowercase()
+                .contains("x-browser-use-api-key: test-key-do-not-echo"));
+            let body: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(
+                body,
+                json!({"profileId":"profile-123","proxyCountryCode":"de","enableRecording":true})
+            );
+        }
+        for (input, expected) in [
+            (None, json!({})),
+            (Some("direct"), json!({"proxyCountryCode":null})),
+            (Some("none"), json!({"proxyCountryCode":null})),
+        ] {
+            assert_eq!(
+                browser_use_create_body_from_lookup(|name| (name == "BROWSER_USE_PROXY_COUNTRY")
+                    .then(|| input.map(str::to_string))
+                    .flatten()),
+                expected
+            );
+        }
+        for (status, body, success) in [
+            (
+                200,
+                json!({"id":TEST_BROWSER_ID,"status":"stopped"}).to_string(),
+                true,
+            ),
+            (
+                200,
+                json!({"id":TEST_BROWSER_ID,"status":"active"}).to_string(),
+                false,
+            ),
+            (
+                200,
+                json!({"id":uuid::Uuid::nil().to_string(),"status":"stopped"}).to_string(),
+                false,
+            ),
+            (200, "not json".to_string(), false),
+            (404, "hostile-secret-body".to_string(), false),
+            (500, "hostile-secret-body".to_string(), false),
+        ] {
+            let (base, server) = browser_use_server(status, &body, false);
+            let result =
+                stop_browser_use_session_at(&base, TEST_BROWSER_ID, Duration::from_secs(2)).await;
+            assert_eq!(result.is_ok(), success, "{result:?}");
+            if let Err(error) = result {
+                assert!(error.contains(TEST_BROWSER_ID));
+                assert!(
+                    !error.contains("hostile-secret-body")
+                        && !error.contains("test-key-do-not-echo")
+                );
+            }
+            let request = server.join().unwrap();
+            assert!(request.starts_with(&format!("PATCH /browsers/{TEST_BROWSER_ID} HTTP/1.1")));
+            assert!(request.ends_with(r#"{"action":"stop"}"#));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_rejects_invalid_identity_without_exposing_secrets() {
+        let guard = browser_use_env();
+        for (status, body) in [
+            (500, "secret-response"),
+            (200, "not-json"),
+            (200, r#"{"cdpUrl":"ws://secret"}"#),
+            (200, r#"{"id":"../secret"}"#),
+        ] {
+            let (base, server) = browser_use_server(status, body, false);
+            let error = connect_browser_use_at(&base, Duration::from_secs(2))
+                .await
+                .unwrap_err();
+            assert!(error.contains("inspect Browser Use Cloud"));
+            assert!(!error.contains("secret") && !error.contains("test-key-do-not-echo"));
+            server.join().unwrap();
+        }
+        guard.set("BROWSER_USE_API_KEY", TEST_BROWSER_ID);
+        let (base, server) = browser_use_server(
+            201,
+            &json!({"id":TEST_BROWSER_ID.to_uppercase()}).to_string(),
+            false,
+        );
+        let error = connect_browser_use_at(&base, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(!error.to_lowercase().contains(TEST_BROWSER_ID));
+        server.join().unwrap();
+        guard.remove("BROWSER_USE_API_KEY");
+        for id in ["../secret", TEST_BROWSER_ID] {
+            let error =
+                stop_browser_use_session_at("http://127.0.0.1:1", id, Duration::from_secs(1))
+                    .await
+                    .unwrap_err();
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_create_and_stop_body_deadlines() {
+        let _guard = browser_use_env();
+        for create in [true, false] {
+            let (base, server) = browser_use_server(200, "{", true);
+            let deadline = Duration::from_millis(50);
+            let started = std::time::Instant::now();
+            let result = if create {
+                connect_browser_use_at(&base, deadline).await.map(|_| ())
+            } else {
+                stop_browser_use_session_at(&base, TEST_BROWSER_ID, deadline).await
+            };
+            assert!(result.unwrap_err().contains("timed out"));
+            assert!(started.elapsed() < Duration::from_millis(400));
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn test_connect_provider_unknown() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_PLUGINS"]);
+        guard.remove("AGENT_BROWSER_PLUGINS");
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(connect_provider("unknown-provider"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_connect_provider_with_supplied_registry_does_not_fallback_to_env_plugins() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_PLUGINS"]);
+        guard.set(
+            "AGENT_BROWSER_PLUGINS",
+            r#"[{"name":"env-cloud","command":"should-not-run","capabilities":["browser.provider"]}]"#,
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(connect_provider_with_plugins("env-cloud", &[]));
+
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown provider"));
     }
@@ -812,5 +1273,157 @@ mod tests {
         // Should be None after take
         let taken_again = take_agentcore_ws_headers();
         assert!(taken_again.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_provider_cleanup_uses_supplied_registry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("cleanup-request.json");
+        let plugin_path = dir.path().join("mock-cleanup-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let session = ProviderSession {
+            provider: "plugin:cloud-browser".to_string(),
+            session_id: r#"{"sessionId":"s1"}"#.to_string(),
+        };
+        let plugins = vec![crate::plugins::PluginConfig {
+            name: "cloud-browser".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            args: vec![marker_path.to_string_lossy().to_string()],
+            capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+            ..crate::plugins::PluginConfig::default()
+        }];
+
+        rt.block_on(close_provider_session_with_plugins(&session, &plugins))
+            .unwrap();
+
+        let request = std::fs::read_to_string(marker_path).unwrap();
+        assert!(request.contains(r#""type":"browser.close""#));
+        assert!(request.contains(r#""sessionId":"s1""#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_provider_falsey_headed_env_is_false() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_SESSION",
+        ]);
+        guard.set("AGENT_BROWSER_HEADED", "false");
+        guard.set("AGENT_BROWSER_ENGINE", "chrome");
+        guard.set("AGENT_BROWSER_SESSION", "provider-test");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let request_path = dir.path().join("browser-launch-request.json");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/browser/test"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let plugins = vec![crate::plugins::PluginConfig {
+            name: "cloud-browser".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            args: vec![request_path.to_string_lossy().to_string()],
+            capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+            ..crate::plugins::PluginConfig::default()
+        }];
+
+        rt.block_on(connect_provider_with_plugins("cloud-browser", &plugins))
+            .unwrap();
+
+        let request: Value =
+            serde_json::from_str(&std::fs::read_to_string(request_path).unwrap()).unwrap();
+        assert_eq!(request["request"]["launchOptions"]["headed"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugin_provider_receives_command_launch_options() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_COLOR_SCHEME",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_SESSION",
+            "AGENT_BROWSER_USER_AGENT",
+        ]);
+        guard.set("AGENT_BROWSER_COLOR_SCHEME", "light");
+        guard.set("AGENT_BROWSER_ENGINE", "chrome");
+        guard.set("AGENT_BROWSER_HEADED", "false");
+        guard.set("AGENT_BROWSER_SESSION", "provider-test");
+        guard.set("AGENT_BROWSER_USER_AGENT", "env-agent");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let request_path = dir.path().join("browser-launch-request.json");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/browser/test"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let plugins = vec![crate::plugins::PluginConfig {
+            name: "cloud-browser".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            args: vec![request_path.to_string_lossy().to_string()],
+            capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+            ..crate::plugins::PluginConfig::default()
+        }];
+
+        rt.block_on(connect_provider_with_plugins_and_options(
+            "cloud-browser",
+            &plugins,
+            Some(json!({
+                "colorScheme": "dark",
+                "engine": "lightpanda",
+                "headed": true,
+                "userAgent": "cli-agent"
+            })),
+        ))
+        .unwrap();
+
+        let request: Value =
+            serde_json::from_str(&std::fs::read_to_string(request_path).unwrap()).unwrap();
+        assert_eq!(request["request"]["launchOptions"]["colorScheme"], "dark");
+        assert_eq!(request["request"]["launchOptions"]["engine"], "lightpanda");
+        assert_eq!(request["request"]["launchOptions"]["headed"], true);
+        assert_eq!(
+            request["request"]["launchOptions"]["userAgent"],
+            "cli-agent"
+        );
     }
 }

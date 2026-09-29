@@ -1,17 +1,63 @@
+#[cfg(windows)]
+use super::windows_process::Child;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
+use crate::ca_bundle::CaBundle;
 
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
     temp_user_data_dir: Option<PathBuf>,
+    temp_nss_home: Option<PreparedNssHome>,
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// Private Xvfb server auto-started for headed mode on displayless Linux
+    /// hosts. Dropped (and killed) after the Chrome tree is torn down.
+    #[cfg(target_os = "linux")]
+    xvfb: Option<XvfbServer>,
+}
+
+struct PreparedNssHomeInner {
+    path: PathBuf,
+}
+
+impl Drop for PreparedNssHomeInner {
+    fn drop(&mut self) {
+        for attempt in 0..3 {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => break,
+                Err(_) if attempt < 2 => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Warning: failed to clean up temporary CA trust store {}: {}",
+                        self.path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedNssHome {
+    inner: Arc<PreparedNssHomeInner>,
+}
+
+impl PreparedNssHome {
+    fn path(&self) -> &Path {
+        &self.inner.path
+    }
 }
 
 impl ChromeProcess {
@@ -86,6 +132,201 @@ impl Drop for ChromeProcess {
     }
 }
 
+/// A private Xvfb virtual display owned by one Chrome process.
+///
+/// Headed Chrome on Linux needs an X display, and some workloads need headed
+/// mode on hosts that have none: headless Chrome cannot composite WebGPU
+/// canvas presentation into screenshots (upstream limitation), so WebGPU
+/// capture requires a real or virtual display. When headed mode is requested,
+/// no DISPLAY is set, and Xvfb is installed, launch spawns a private server
+/// instead of failing. Opt out with AGENT_BROWSER_NO_XVFB=1.
+///
+/// The server requires MIT-MAGIC-COOKIE-1 authentication (`-auth`): without
+/// authorization records an X server allows any local user to connect, which
+/// on a shared host would let other accounts observe the browser and inject
+/// input. Only the paired Chrome process receives the cookie via XAUTHORITY.
+#[cfg(target_os = "linux")]
+struct XvfbServer {
+    child: Child,
+    display: String,
+    auth_file: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for XvfbServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.auth_file);
+    }
+}
+
+/// Write an .Xauthority file containing one FamilyWild MIT-MAGIC-COOKIE-1
+/// record with a random cookie, created 0600.
+///
+/// FamilyWild (0xffff, empty address and display number) matches any display,
+/// which sidesteps a chicken-and-egg with `-displayfd`: the display number is
+/// only known after the server starts, but the auth file must exist before.
+/// The server side is unaffected -- X servers compare only the cookie bytes
+/// for MIT-MAGIC-COOKIE-1 -- and client libraries (libXau/libxcb) accept
+/// FamilyWild entries for any display.
+#[cfg(target_os = "linux")]
+fn write_xauth_file(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Uuid v4 carries 122 random bits in 16 bytes.
+    let cookie = uuid::Uuid::new_v4();
+    let name = b"MIT-MAGIC-COOKIE-1";
+
+    // .Xauthority records are sequences of big-endian u16-length-prefixed
+    // fields: family, address, display number, auth name, auth data.
+    let mut buf: Vec<u8> = Vec::with_capacity(10 + name.len() + 16);
+    buf.extend_from_slice(&0xffffu16.to_be_bytes()); // FamilyWild
+    buf.extend_from_slice(&0u16.to_be_bytes()); // address: empty
+    buf.extend_from_slice(&0u16.to_be_bytes()); // display number: empty
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    buf.extend_from_slice(&16u16.to_be_bytes());
+    buf.extend_from_slice(cookie.as_bytes());
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&buf)
+}
+
+#[cfg(target_os = "linux")]
+/// True when the launch will effectively run headed and therefore needs a
+/// display. This must track `build_chrome_args`: extensions suppress
+/// `--headless=new` (content scripts are not injected headless), so a
+/// nominally headless launch with extensions is headed in practice.
+fn xvfb_applicable(options: &LaunchOptions) -> bool {
+    !options.effectively_headless()
+}
+
+#[cfg(target_os = "linux")]
+fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
+    if !xvfb_applicable(options) {
+        return None;
+    }
+    if std::env::var("DISPLAY")
+        .map(|d| !d.is_empty())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if options.no_xvfb {
+        return None;
+    }
+
+    let (w, h) = options.viewport_size.unwrap_or((1280, 720));
+
+    // Private MIT-MAGIC-COOKIE-1 authority file; passed to the server via
+    // -auth and to the paired Chrome via XAUTHORITY. Removed on Drop.
+    let auth_file =
+        std::env::temp_dir().join(format!("agent-browser-xauth-{}", uuid::Uuid::new_v4()));
+    if write_xauth_file(&auth_file).is_err() {
+        return None;
+    }
+    let cleanup_auth = |path: &Path| {
+        let _ = std::fs::remove_file(path);
+    };
+
+    // Let Xvfb allocate the display itself with -displayfd: the server binds
+    // the first free display atomically and writes its number to the given
+    // fd. Probing /tmp/.X11-unix for free numbers is racy -- two concurrent
+    // sessions could adopt the same display, and closing one would kill the
+    // display under the other session's Chrome.
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+
+    let mut fds = [0i32; 2];
+    // SAFETY: plain pipe(2); both ends are wrapped in File below so they are
+    // closed on every path out of this function.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        cleanup_auth(&auth_file);
+        return None;
+    }
+    // SAFETY: fds are fresh from pipe(2) and owned exclusively here.
+    let mut read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+
+    let mut child = match Command::new("Xvfb")
+        .args([
+            "-displayfd",
+            &fds[1].to_string(),
+            "-screen",
+            "0",
+            &format!("{}x{}x24", w, h),
+            "-nolisten",
+            "tcp",
+            "-auth",
+            &auth_file.display().to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        // Xvfb not installed (or not executable): headed launch proceeds
+        // without a display and surfaces Chrome's own error.
+        Err(_) => {
+            cleanup_auth(&auth_file);
+            return None;
+        }
+    };
+    // Drop the parent's copy of the write end so the read below sees EOF as
+    // soon as Xvfb exits without reporting a display.
+    drop(write_end);
+
+    // SAFETY: read_end owns fds[0]; make it non-blocking so a wedged Xvfb
+    // cannot stall the launch past the deadline.
+    unsafe {
+        let flags = libc::fcntl(fds[0], libc::F_GETFL);
+        libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let mut chunk = [0u8; 16];
+        match read_end.read(&mut chunk) {
+            // EOF: Xvfb exited without binding a display.
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    match String::from_utf8_lossy(&buf[..pos]).trim().parse::<u32>() {
+                        Ok(num) => {
+                            return Some(XvfbServer {
+                                child,
+                                display: format!(":{}", num),
+                                auth_file,
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    cleanup_auth(&auth_file);
+    None
+}
+
 #[derive(Clone)]
 pub struct LaunchOptions {
     pub headless: bool,
@@ -101,6 +342,10 @@ pub struct LaunchOptions {
     pub storage_state: Option<String>,
     pub user_agent: Option<String>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<String>,
+    pub(crate) ca_bundle: Option<CaBundle>,
+    pub(crate) ca_cert_digest: Option<[u8; 32]>,
+    pub(crate) prepared_nss_home: Option<PreparedNssHome>,
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
     /// Hide native scrollbars in headless Chromium screenshots by launching
@@ -113,6 +358,36 @@ pub struct LaunchOptions {
     /// Chrome uses the real system keychain. Set automatically when launching
     /// with a copied Chrome profile.
     pub use_real_keychain: bool,
+    /// Enable WebGPU in environments where Chrome does not expose it by
+    /// default (headless, GPU-less containers, blocklisted GPUs). On Linux
+    /// this routes WebGPU through SwiftShader's software Vulkan with software
+    /// compositing so it works without a GPU or display.
+    pub webgpu: bool,
+    /// Enable Chrome's experimental WebMCP implementation for agent-browser
+    /// managed sessions. Enabled by default and disabled with `--no-webmcp`.
+    pub webmcp: bool,
+    /// Disable automatic Xvfb for headed launches on displayless Linux
+    /// hosts (AGENT_BROWSER_NO_XVFB). Carried as a launch option so the
+    /// CLI's current environment wins over the env a long-lived daemon was
+    /// spawned with.
+    pub no_xvfb: bool,
+    /// Restrict WebRTC to proxied transports so direct UDP cannot bypass the
+    /// HTTP domain filter. Enabled automatically with `--allowed-domains`.
+    pub restrict_webrtc: bool,
+}
+
+impl LaunchOptions {
+    /// Whether Chrome will actually run headless after applying launch rules.
+    ///
+    /// Extensions force headed mode because Chrome does not inject their
+    /// content scripts under `--headless=new`.
+    pub(crate) fn effectively_headless(&self) -> bool {
+        self.headless
+            && !self
+                .extensions
+                .as_ref()
+                .is_some_and(|exts| !exts.is_empty())
+    }
 }
 
 impl Default for LaunchOptions {
@@ -131,11 +406,19 @@ impl Default for LaunchOptions {
             storage_state: None,
             user_agent: None,
             ignore_https_errors: false,
+            ca_cert: None,
+            ca_bundle: None,
+            ca_cert_digest: None,
+            prepared_nss_home: None,
             color_scheme: None,
             download_path: None,
             hide_scrollbars: true,
             viewport_size: None,
             use_real_keychain: false,
+            webgpu: false,
+            webmcp: true,
+            no_xvfb: false,
+            restrict_webrtc: false,
         }
     }
 }
@@ -147,6 +430,38 @@ struct ChromeArgs {
 }
 
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
+    // Chrome only honors the last --enable-features switch on the command
+    // line, so every feature must be collected into a single flag.
+    let mut enable_features: Vec<String> = vec![
+        "NetworkService".to_string(),
+        "NetworkServiceInProcess".to_string(),
+    ];
+    if options.webmcp {
+        enable_features.push("WebMCPTesting".to_string());
+        enable_features.push("DevToolsWebMCPSupport".to_string());
+    }
+    if options.webgpu && cfg!(target_os = "linux") {
+        enable_features.push("Vulkan".to_string());
+    }
+
+    // User-supplied --enable-features values are merged into that single
+    // flag too: appending them as a second switch would silently clobber
+    // the preset's features (e.g. drop the WebGPU preset's Vulkan). To turn
+    // a preset feature off, pass --disable-features=<name>, which Chrome
+    // resolves as disabled.
+    let mut user_args: Vec<String> = Vec::new();
+    for arg in &options.args {
+        if let Some(values) = arg.strip_prefix("--enable-features=") {
+            for feature in values.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                if !enable_features.iter().any(|f| f == feature) {
+                    enable_features.push(feature.to_string());
+                }
+            }
+        } else {
+            user_args.push(arg.clone());
+        }
+    }
+
     let mut args = vec![
         "--remote-debugging-port=0".to_string(),
         "--no-first-run".to_string(),
@@ -160,23 +475,37 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
         "--disable-features=Translate".to_string(),
-        "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
+        format!("--enable-features={}", enable_features.join(",")),
         "--metrics-recording-only".to_string(),
     ];
+
+    if options.webgpu {
+        // WebGPU is not exposed in headless or GPU-blocklisted environments
+        // unless explicitly enabled.
+        args.push("--enable-unsafe-webgpu".to_string());
+        if cfg!(target_os = "linux") {
+            // Route WebGPU through SwiftShader's software Vulkan and disable
+            // Vulkan surface presentation (software compositing). This
+            // combination produces real pixels in GPU-less containers and CI;
+            // hardware-Vulkan users can override via --args (later switches
+            // win). macOS and Windows use the hardware Metal/D3D backends.
+            args.push("--use-angle=vulkan".to_string());
+            args.push("--use-vulkan=swiftshader".to_string());
+            args.push("--use-webgpu-adapter=swiftshader".to_string());
+            args.push("--disable-vulkan-surface".to_string());
+        }
+    }
 
     if !options.use_real_keychain {
         args.push("--password-store=basic".to_string());
         args.push("--use-mock-keychain".to_string());
     }
 
-    let has_extensions = options
-        .extensions
-        .as_ref()
-        .is_some_and(|exts| !exts.is_empty());
+    let effectively_headless = options.effectively_headless();
 
     // Extensions require headed mode in native Chrome (content scripts are not
     // injected in headless mode).  Skip --headless when extensions are loaded.
-    if options.headless && !has_extensions {
+    if effectively_headless {
         args.push("--headless=new".to_string());
         // Linux paints native scrollbars into viewport screenshots unless
         // Chrome is launched with this flag. `--hide-scrollbars` is
@@ -236,12 +565,21 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         .iter()
         .any(|a| a.starts_with("--start-maximized") || a.starts_with("--window-size="));
 
-    if !has_window_size && options.headless && !has_extensions {
+    if !has_window_size && effectively_headless {
         let (w, h) = options.viewport_size.unwrap_or((1280, 720));
         args.push(format!("--window-size={},{}", w, h));
     }
 
-    args.extend(options.args.iter().cloned());
+    args.extend(user_args);
+
+    if options.restrict_webrtc {
+        // Append this after user and plugin arguments so an unsafe custom
+        // policy cannot override the containment setting. JavaScript-level
+        // RTCPeerConnection blocking is the primary control; this prevents
+        // direct UDP traffic if page code obtains a native constructor.
+        args.retain(|arg| !arg.starts_with("--force-webrtc-ip-handling-policy="));
+        args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string());
+    }
 
     if should_disable_sandbox(&args) {
         args.push("--no-sandbox".to_string());
@@ -256,6 +594,120 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         user_data_dir,
         temp_user_data_dir,
     })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_nss_home(ca_cert: &CaBundle) -> Result<PreparedNssHome, String> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let home = std::env::temp_dir().join(format!("agent-browser-nss-{}", uuid::Uuid::new_v4()));
+    let pki_dir = home.join(".local/share/pki");
+    let db_dir = pki_dir.join("nssdb");
+
+    let result = (|| {
+        std::fs::create_dir_all(&db_dir)
+            .map_err(|e| format!("Failed to create temporary CA trust store: {e}"))?;
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to secure temporary CA trust store: {e}"))?;
+        symlink(".local/share/pki", home.join(".pki"))
+            .map_err(|e| format!("Failed to configure temporary CA trust store: {e}"))?;
+
+        let db = format!("sql:{}", db_dir.display());
+        run_certutil(
+            &["-N", "--empty-password", "-d", &db],
+            "initialize the NSS database",
+        )?;
+
+        for (index, cert) in ca_cert.certificates().iter().enumerate() {
+            let cert_path = home.join(format!("ca-{index}.der"));
+            std::fs::write(&cert_path, cert.as_ref())
+                .map_err(|e| format!("Failed to stage CA certificate for import: {e}"))?;
+            std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Failed to secure staged CA certificate: {e}"))?;
+            let nickname = format!("agent-browser-ca-{index}");
+            let cert_path_arg = cert_path.display().to_string();
+            let import_result = run_certutil(
+                &[
+                    "-A",
+                    "-d",
+                    &db,
+                    "-t",
+                    "C,,",
+                    "-n",
+                    &nickname,
+                    "-i",
+                    &cert_path_arg,
+                ],
+                "import the CA certificate",
+            );
+            let _ = std::fs::remove_file(&cert_path);
+            import_result?;
+        }
+
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(&home);
+        return Err(error);
+    }
+
+    Ok(PreparedNssHome {
+        inner: Arc::new(PreparedNssHomeInner { path: home }),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn prepare_nss_home(_ca_cert: &CaBundle) -> Result<PreparedNssHome, String> {
+    Err("--ca-cert is currently supported only on Linux".to_string())
+}
+
+fn resolve_prepared_nss_home(options: &LaunchOptions) -> Result<Option<PreparedNssHome>, String> {
+    if let Some(home) = options.prepared_nss_home.clone() {
+        return Ok(Some(home));
+    }
+
+    let ca_bundle = match options.ca_bundle.clone() {
+        Some(bundle) => Some(bundle),
+        None => options
+            .ca_cert
+            .as_deref()
+            .map(crate::ca_bundle::load)
+            .transpose()?,
+    };
+
+    ca_bundle.as_ref().map(prepare_nss_home).transpose()
+}
+
+#[cfg(target_os = "linux")]
+fn run_certutil(args: &[&str], action: &str) -> Result<(), String> {
+    let output = Command::new("certutil").args(args).output().map_err(|e| {
+        format!(
+            "Failed to {action}: could not run certutil ({e}). Run agent-browser install --with-deps, or install libnss3-tools on Debian/Ubuntu or nss-tools on RPM Linux."
+        )
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        Err(format!(
+            "Failed to {action}: certutil exited with {}. Run agent-browser install --with-deps, or repair libnss3-tools on Debian/Ubuntu or nss-tools on RPM Linux.",
+            output.status
+        ))
+    } else {
+        Err(format!("Failed to {action}: {detail}"))
+    }
+}
+
+fn terminate_launched_chrome(child: &mut Child) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
 }
 
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
@@ -358,11 +810,40 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    #[cfg(target_os = "linux")]
+    let temp_nss_home = match resolve_prepared_nss_home(options) {
+        Ok(home) => home,
+        Err(error) => {
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err(error);
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let temp_nss_home: Option<PreparedNssHome> = None;
+
+    #[cfg(target_os = "linux")]
+    let xvfb = maybe_start_xvfb(options);
+
+    #[cfg(not(windows))]
     let mut cmd = Command::new(chrome_path);
+    #[cfg(not(windows))]
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+
+    // Scope the virtual display and its auth cookie to the Chrome child;
+    // the daemon's own environment is left untouched.
+    #[cfg(target_os = "linux")]
+    if let Some(ref x) = xvfb {
+        cmd.env("DISPLAY", &x.display);
+        cmd.env("XAUTHORITY", &x.auth_file);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(ref home) = temp_nss_home {
+        cmd.env("HOME", home.path());
+        cmd.env("XDG_DATA_HOME", home.path().join(".local/share"));
+    }
 
     // Place Chrome in its own process group so we can kill the entire tree
     // (main process + GPU/renderer/utility/crashpad helpers) with a single
@@ -385,7 +866,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    #[cfg(not(windows))]
+    let spawned = cmd.spawn();
+    #[cfg(windows)]
+    let spawned = Child::spawn(chrome_path, &args, options.effectively_headless());
+    let mut child = spawned.map_err(|e| {
         cleanup_temp_dir(&temp_user_data_dir);
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
@@ -401,7 +886,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         Err(primary_err) => {
             // Fallback: scrape stderr (legacy behavior) for better diagnostics.
             let stderr = child.stderr.take().ok_or_else(|| {
-                let _ = child.kill();
+                terminate_launched_chrome(&mut child);
                 cleanup_temp_dir(&temp_user_data_dir);
                 "Failed to capture Chrome stderr".to_string()
             })?;
@@ -409,7 +894,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             match wait_for_ws_url_until(reader, deadline) {
                 Ok(url) => url,
                 Err(fallback_err) => {
-                    let _ = child.kill();
+                    terminate_launched_chrome(&mut child);
                     cleanup_temp_dir(&temp_user_data_dir);
                     return Err(format!(
                         "{}\n(also tried parsing stderr) {}",
@@ -432,8 +917,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         child,
         ws_url,
         temp_user_data_dir,
+        temp_nss_home,
         #[cfg(unix)]
         pgid,
+        #[cfg(target_os = "linux")]
+        xvfb,
     })
 }
 
@@ -470,7 +958,7 @@ fn wait_for_devtools_active_port(
 }
 
 fn wait_for_ws_url_until(
-    reader: BufReader<std::process::ChildStderr>,
+    reader: impl BufRead,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
@@ -1073,14 +1561,44 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     false
 }
 
-/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
-/// On CI runners and containers, /dev/shm is often too small (64MB default),
-/// which causes Chrome to crash mid-session.
+#[cfg(any(target_os = "linux", test))]
+const MIN_DEV_SHM_AVAILABLE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+fn available_filesystem_bytes(path: &Path) -> Option<u64> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+
+    // SAFETY: `path` is a valid, NUL-terminated C string and `stats` points to
+    // writable storage for a `statvfs` value. A successful call initializes it.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    let available_bytes = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+    Some(u64::try_from(available_bytes).unwrap_or(u64::MAX))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dev_shm_is_too_small(available_bytes: u64) -> bool {
+    available_bytes < MIN_DEV_SHM_AVAILABLE_BYTES
+}
+
+/// Returns true if Chrome should use disk instead of `/dev/shm` for shared memory.
+/// Prefer the actual filesystem capacity over environment markers because some
+/// container runtimes expose no conventional marker and others provision a large mount.
 fn should_disable_dev_shm(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
         return false;
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(available_bytes) = available_filesystem_bytes(Path::new("/dev/shm")) {
+        return dev_shm_is_too_small(available_bytes);
+    }
+
+    // Preserve the existing safe fallback when `/dev/shm` cannot be inspected.
     if std::env::var("CI").is_ok() {
         return true;
     }
@@ -1222,6 +1740,12 @@ fn find_playwright_chromium() -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
+    // Playwright's Linux layout is chrome-linux/chrome; chrome-linux64 is
+    // the Chrome-for-Testing naming kept as a fallback.
+    let standard = chromium_dir.join("chrome-linux/chrome");
+    if standard.exists() {
+        return standard;
+    }
     chromium_dir.join("chrome-linux64/chrome")
 }
 
@@ -1252,6 +1776,71 @@ mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
 
+    #[test]
+    fn test_dev_shm_capacity_threshold() {
+        assert!(dev_shm_is_too_small(64 * 1024 * 1024));
+        assert!(dev_shm_is_too_small(128 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(256 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_existing_disable_dev_shm_arg_is_not_duplicated() {
+        assert!(!should_disable_dev_shm(&[
+            "--disable-dev-shm-usage".to_string()
+        ]));
+    }
+
+    fn prepared_nss_home() -> PreparedNssHome {
+        let path = std::env::temp_dir().join(format!(
+            "agent-browser-prepared-nss-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        PreparedNssHome {
+            inner: Arc::new(PreparedNssHomeInner { path }),
+        }
+    }
+
+    #[test]
+    fn test_resolve_prepared_nss_home_without_ca_returns_none() {
+        assert!(resolve_prepared_nss_home(&LaunchOptions::default())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_resolve_prepared_nss_home_reuses_prepared_home() {
+        let prepared = prepared_nss_home();
+        let expected_path = prepared.path().to_path_buf();
+        let options = LaunchOptions {
+            prepared_nss_home: Some(prepared),
+            ca_cert: Some("/path/that/must/not/be/read".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_prepared_nss_home(&options).unwrap().unwrap();
+        assert_eq!(resolved.path(), expected_path);
+    }
+
+    #[test]
+    fn test_resolve_prepared_nss_home_surfaces_ca_load_error() {
+        let missing = std::env::temp_dir()
+            .join(format!("missing-ca-{}", uuid::Uuid::new_v4()))
+            .display()
+            .to_string();
+        let options = LaunchOptions {
+            ca_cert: Some(missing),
+            ..Default::default()
+        };
+
+        let result = resolve_prepared_nss_home(&options);
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("Failed to read CA certificate")
+        ));
+    }
+
     #[cfg(unix)]
     fn spawn_noop_child() -> Child {
         Command::new("/bin/sh")
@@ -1265,13 +1854,8 @@ mod tests {
 
     #[cfg(windows)]
     fn spawn_noop_child() -> Child {
-        Command::new("cmd.exe")
-            .args(["/C", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        Child::spawn(&cmd, &["/C".into(), "exit 0".into()], false).unwrap()
     }
 
     #[test]
@@ -1489,6 +2073,218 @@ mod tests {
     }
 
     #[test]
+    fn test_build_args_webgpu_default_off() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(!result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
+        assert!(!result.args.iter().any(|a| a.contains("Vulkan")));
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--use-webgpu-adapter")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_restrict_webrtc_enforces_safe_policy() {
+        let opts = LaunchOptions {
+            restrict_webrtc: true,
+            args: vec!["--force-webrtc-ip-handling-policy=default".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let policies: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--force-webrtc-ip-handling-policy="))
+            .collect();
+        assert_eq!(
+            policies,
+            vec![&"--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string()]
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_webgpu_includes_webgpu_flags() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
+        if cfg!(target_os = "linux") {
+            let features: Vec<&str> = result
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--enable-features="))
+                .unwrap()
+                .split(',')
+                .collect();
+            assert!(features.contains(&"NetworkService"));
+            assert!(features.contains(&"NetworkServiceInProcess"));
+            assert!(features.contains(&"Vulkan"));
+            assert!(result.args.iter().any(|a| a == "--use-angle=vulkan"));
+            assert!(result.args.iter().any(|a| a == "--use-vulkan=swiftshader"));
+            assert!(result
+                .args
+                .iter()
+                .any(|a| a == "--use-webgpu-adapter=swiftshader"));
+            assert!(result.args.iter().any(|a| a == "--disable-vulkan-surface"));
+        } else {
+            assert!(!result
+                .args
+                .iter()
+                .any(|a| a.starts_with("--use-webgpu-adapter")));
+        }
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_merges_user_enable_features() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            args: vec![
+                "--enable-features=Foo,Bar".to_string(),
+                "--some-other-flag".to_string(),
+                // Duplicate of a preset feature must not repeat.
+                "--enable-features=NetworkService".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let flags: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--enable-features="))
+            .collect();
+        assert_eq!(flags.len(), 1, "user features must merge, not clobber");
+        let features: Vec<&str> = flags[0]
+            .strip_prefix("--enable-features=")
+            .unwrap()
+            .split(',')
+            .collect();
+        assert!(features.contains(&"NetworkService"));
+        assert!(features.contains(&"Foo"));
+        assert!(features.contains(&"Bar"));
+        if cfg!(target_os = "linux") {
+            assert!(
+                features.contains(&"Vulkan"),
+                "user --enable-features must not drop the WebGPU preset's Vulkan"
+            );
+        }
+        assert_eq!(
+            features.iter().filter(|f| **f == "NetworkService").count(),
+            1
+        );
+        assert!(result.args.iter().any(|a| a == "--some-other-flag"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_xvfb_applicable_tracks_effective_headed_mode() {
+        // Plain headless: no display needed.
+        assert!(!xvfb_applicable(&LaunchOptions::default()));
+        // Headed: needs a display.
+        assert!(xvfb_applicable(&LaunchOptions {
+            headless: false,
+            ..Default::default()
+        }));
+        // Nominally headless with extensions: build_chrome_args suppresses
+        // --headless, so this runs headed and needs a display too.
+        assert!(xvfb_applicable(&LaunchOptions {
+            headless: true,
+            extensions: Some(vec!["/tmp/ext".to_string()]),
+            ..Default::default()
+        }));
+        // An empty extension list does not force headed mode.
+        assert!(!xvfb_applicable(&LaunchOptions {
+            headless: true,
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn test_effectively_headless_tracks_extension_forced_headed_mode() {
+        assert!(LaunchOptions::default().effectively_headless());
+        assert!(!LaunchOptions {
+            headless: false,
+            ..Default::default()
+        }
+        .effectively_headless());
+        assert!(!LaunchOptions {
+            headless: true,
+            extensions: Some(vec!["/tmp/ext".to_string()]),
+            ..Default::default()
+        }
+        .effectively_headless());
+        assert!(LaunchOptions {
+            headless: true,
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        }
+        .effectively_headless());
+    }
+
+    #[test]
+    fn test_build_args_single_enable_features_flag() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        // Chrome only honors the last --enable-features switch, so the preset
+        // must never emit more than one.
+        let count = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--enable-features="))
+            .count();
+        assert_eq!(count, 1);
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_enables_webmcp_by_default() {
+        let result = build_chrome_args(&LaunchOptions::default()).unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(features.contains("WebMCPTesting"));
+        assert!(features.contains("DevToolsWebMCPSupport"));
+    }
+
+    #[test]
+    fn test_build_args_webmcp_opt_out() {
+        let result = build_chrome_args(&LaunchOptions {
+            webmcp: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(!features.contains("WebMCPTesting"));
+        assert!(!features.contains("DevToolsWebMCPSupport"));
+    }
+
+    #[test]
     fn test_build_args_headless_with_extensions_skips_headless_flag() {
         let opts = LaunchOptions {
             headless: true,
@@ -1585,13 +2381,46 @@ mod tests {
                 child,
                 ws_url: String::new(),
                 temp_user_data_dir: Some(dir.clone()),
+                temp_nss_home: None,
                 #[cfg(unix)]
                 pgid: None,
+                #[cfg(target_os = "linux")]
+                xvfb: None,
             };
             // _process dropped here
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_write_xauth_file_wildcard_cookie_record() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("xauth-test-{}", uuid::Uuid::new_v4()));
+        write_xauth_file(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "authority file must be private");
+
+        let bytes = std::fs::read(&path).unwrap();
+        // family=FamilyWild, empty address, empty number
+        assert_eq!(&bytes[..6], &[0xff, 0xff, 0, 0, 0, 0]);
+        // name length + MIT-MAGIC-COOKIE-1
+        assert_eq!(&bytes[6..8], &18u16.to_be_bytes());
+        assert_eq!(&bytes[8..26], b"MIT-MAGIC-COOKIE-1");
+        // 16-byte cookie
+        assert_eq!(&bytes[26..28], &16u16.to_be_bytes());
+        assert_eq!(bytes.len(), 28 + 16);
+
+        // A second write must produce a different cookie.
+        let path2 = std::env::temp_dir().join(format!("xauth-test-{}", uuid::Uuid::new_v4()));
+        write_xauth_file(&path2).unwrap();
+        assert_ne!(std::fs::read(&path2).unwrap()[28..], bytes[28..]);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]
