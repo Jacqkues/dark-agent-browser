@@ -554,7 +554,9 @@ pub fn run_install_camoufox() {
             "{} Node.js 18+ is required for the Camoufox engine but was not found on PATH.",
             color::error_indicator()
         );
-        eprintln!("  Install Node from https://nodejs.org and re-run: agent-browser install camoufox");
+        eprintln!(
+            "  Install Node from https://nodejs.org and re-run: agent-browser install camoufox"
+        );
         exit(1);
     }
 
@@ -601,7 +603,10 @@ pub fn run_install_camoufox() {
         target_dir.clone()
     };
 
-    println!("{}", color::cyan("Installing Camoufox sidecar dependencies..."));
+    println!(
+        "{}",
+        color::cyan("Installing Camoufox sidecar dependencies...")
+    );
     println!("  {}", pkg_dir.display());
 
     // Use npm to install the leaf sidecar package's dependencies. npm is the
@@ -628,7 +633,10 @@ pub fn run_install_camoufox() {
     let install_status = install_cmd.current_dir(&pkg_dir).status();
     match install_status {
         Ok(s) if s.success() => {
-            println!("{} Sidecar dependencies installed", color::success_indicator());
+            println!(
+                "{} Sidecar dependencies installed",
+                color::success_indicator()
+            );
         }
         Ok(_) => {
             eprintln!(
@@ -666,7 +674,11 @@ pub fn run_install_camoufox() {
             exit(1);
         }
         Err(e) => {
-            eprintln!("{} Could not download Camoufox: {}", color::error_indicator(), e);
+            eprintln!(
+                "{} Could not download Camoufox: {}",
+                color::error_indicator(),
+                e
+            );
             exit(1);
         }
     }
